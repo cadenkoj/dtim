@@ -39,6 +39,13 @@ impl ThreatIndicator {
     }
 }
 
+#[derive(Serialize, Deserialize, Clone, Debug)]
+pub struct EncryptedThreatIndicator {
+    ciphertext: String,
+    nonce: String,
+    mac: String,
+}
+
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
 pub enum IndicatorType {
     Ipv4Address,

@@ -30,4 +30,12 @@ impl Node {
     pub fn get_indicator(&self, id: &Uuid) -> Option<&ThreatIndicator> {
         self.indicators.get(id)
     }
+    
+    pub fn list_indicators(&self) -> Vec<ThreatIndicator> {
+        self.indicators.values().cloned().collect()
+    }
+
+    pub fn get_peers(&self) -> &[String] {
+        &self.peers
+    }
 }
