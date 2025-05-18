@@ -10,7 +10,6 @@ use sha2::{Digest, Sha256};
 use std::{collections::HashMap, io};
 
 pub struct Node {
-    id: Uuid,
     indicators: HashMap<Uuid, ThreatIndicator>,
     peers: Vec<String>,
     logger: EncryptedLogger,
@@ -26,7 +25,6 @@ impl Node {
         keypair: (SigningKey, VerifyingKey),
     ) -> Self {
         Node {
-            id: Uuid::new_v7(),
             indicators: HashMap::new(),
             peers: Vec::new(),
             logger,

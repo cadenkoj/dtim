@@ -2,7 +2,7 @@ use aes_gcm::aead::rand_core::RngCore;
 use aes_gcm::aead::{Aead, KeyInit, OsRng};
 use aes_gcm::{Aes256Gcm, Key, Nonce};
 use base64::prelude::*;
-use ed25519_dalek::{SecretKey, Signer, SigningKey, VerifyingKey};
+use ed25519_dalek::{SigningKey, VerifyingKey};
 use std::fs::{self, File};
 use std::io::{Read, Write};
 use std::path::Path;
