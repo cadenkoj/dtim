@@ -28,10 +28,6 @@ impl CryptoContext {
         }
     }
 
-    pub fn set_key(&mut self, key: Key<Aes256Gcm>) {
-        self.current_key = key;
-    }
-
     pub fn rotate_key(&mut self) {
         let now = SystemTime::now()
             .duration_since(UNIX_EPOCH)

@@ -137,33 +137,33 @@ impl ThreatIndicator {
         }
     }
 
-    pub fn anonymized(&self, level: PrivacyLevel) -> serde_json::Value {
+    pub fn to_json(&self, level: PrivacyLevel) -> serde_json::Value {
+        let mut json = json!({
+            "indicator_type": self.indicator_type,
+            "value": self.value,
+        });
+
         match level {
-            PrivacyLevel::Strict => json!({
-                "indicator_type": self.indicator_type,
-                "value": self.value,
-            }),
-            PrivacyLevel::Moderate => json!({
-                "indicator_type": self.indicator_type,
-                "value": self.value,
-                "confidence": self.confidence,
-                "created_at": self.created_at,
-                "updated_at": self.updated_at,
-            }),
-            PrivacyLevel::Open => json!({
-                "indicator_type": self.indicator_type,
-                "value": self.value,
-                "confidence": self.confidence,
-                "created_at": self.created_at,
-                "updated_at": self.updated_at,
-                "tags": self.tags,
-                "custom_fields": self.custom_fields,
-                "access_scope": self.access_scope,
-            }),
+            PrivacyLevel::Strict => json,
+            PrivacyLevel::Moderate => {
+                json["confidence"] = json!(self.confidence);
+                json["created_at"] = json!(self.created_at);
+                json["updated_at"] = json!(self.updated_at);
+                json
+            }
+            PrivacyLevel::Open => {
+                json["confidence"] = json!(self.confidence);
+                json["created_at"] = json!(self.created_at);
+                json["updated_at"] = json!(self.updated_at);
+                json["tags"] = json!(self.tags);
+                json["custom_fields"] = json!(self.custom_fields);
+                json["access_scope"] = json!(self.access_scope);
+                json
+            }
         }
     }
 
-    pub fn to_stix(&self) -> Option<serde_json::Value> {
+    pub fn to_stix(&self, privacy_level: PrivacyLevel) -> Option<serde_json::Value> {
         if let IndicatorType::Other(_) = self.indicator_type {
             log::warn!(
                 "Cannot convert unknown indicator type to STIX: {:?}",
@@ -172,19 +172,32 @@ impl ThreatIndicator {
             return None;
         }
 
-        Some(json!({
+        let mut stix_obj = json!({
             "type": "indicator",
             "id": format!("indicator--{}", self.id),
-            "created": self.created_at,
-            "modified": self.updated_at,
-            "labels": self.tags,
-            "confidence": self.confidence,
             "pattern": self.get_pattern(),
-            "extensions": self.custom_fields,
-            "granular_markings": [
-                {"marking_ref": self.access_scope}
-            ]
-        }))
+        });
+
+        match privacy_level {
+            PrivacyLevel::Strict => Some(stix_obj),
+            PrivacyLevel::Moderate => {
+                stix_obj["created"] = json!(self.created_at);
+                stix_obj["modified"] = json!(self.updated_at);
+                stix_obj["confidence"] = json!(self.confidence);
+                Some(stix_obj)
+            }
+            PrivacyLevel::Open => {
+                stix_obj["created"] = json!(self.created_at);
+                stix_obj["modified"] = json!(self.updated_at);
+                stix_obj["confidence"] = json!(self.confidence);
+                stix_obj["labels"] = json!(self.tags);
+                stix_obj["extensions"] = json!(self.custom_fields);
+                stix_obj["granular_markings"] = json!([
+                    {"marking_ref": self.access_scope}
+                ]);
+                Some(stix_obj)
+            }
+        }
     }
 }
 

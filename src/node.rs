@@ -1,4 +1,8 @@
-use crate::{logging::EncryptedLogger, models::ThreatIndicator};
+use crate::{
+    config::PrivacyConfig,
+    logging::EncryptedLogger,
+    models::{PrivacyLevel, ThreatIndicator},
+};
 use std::{collections::HashMap, io};
 use uuid::Uuid;
 
@@ -6,21 +10,30 @@ pub struct Node {
     indicators: HashMap<Uuid, ThreatIndicator>,
     peers: Vec<String>,
     logger: EncryptedLogger,
+    level: PrivacyLevel,
+    allow_custom_fields: bool,
 }
 
 impl Node {
-    pub fn new(logger: EncryptedLogger) -> Self {
+    pub fn new(logger: EncryptedLogger, privacy: PrivacyConfig) -> Self {
         Node {
             indicators: HashMap::new(),
             peers: Vec::new(),
             logger,
+            level: match privacy.level.as_str() {
+                "strict" => PrivacyLevel::Strict,
+                "open" => PrivacyLevel::Open,
+                _ => PrivacyLevel::Moderate,
+            },
+            allow_custom_fields: privacy.allow_custom_fields,
         }
     }
 
     pub fn bootstrap_peers(&mut self, peers: Vec<String>) {
         for peer in peers {
             self.peers.push(peer.clone());
-            let _ = self.logger
+            let _ = self
+                .logger
                 .log(log::Level::Info, &format!("Bootstrapping peer: {}", peer));
         }
     }
@@ -33,6 +46,14 @@ impl Node {
             &format!("Adding indicator: {:?}", indicator),
         );
         id
+    }
+
+    pub fn get_level(&self) -> PrivacyLevel {
+        self.level
+    }
+
+    pub fn get_allow_custom_fields(&self) -> bool {
+        self.allow_custom_fields
     }
 
     pub fn get_indicator(&self, id: &Uuid) -> Option<&ThreatIndicator> {

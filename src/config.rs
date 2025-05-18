@@ -14,9 +14,40 @@ pub struct StorageConfig {
 }
 
 #[derive(Debug, Deserialize)]
+pub struct NetworkConfig {
+    pub gossip_interval_seconds: u64,
+    pub peers_per_round: u32,
+    pub default_peers: Vec<String>,
+    pub registry_url: String,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct PrivacyConfig {
+    pub level: String,
+    pub allow_custom_fields: bool,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct WatchersConfig {
+    pub ufw_log_path: PathBuf,
+    pub fail2ban_log_path: PathBuf,
+    pub suricata_log_path: PathBuf,
+    pub zeek_log_dir: PathBuf,
+    pub clamav_scan_dir: PathBuf,
+    pub virustotal_api_key: String,
+    pub nginx_access_log: PathBuf,
+    pub nginx_error_log: PathBuf,
+    pub apache_access_log: PathBuf,
+    pub apache_error_log: PathBuf,
+}
+
+#[derive(Debug, Deserialize)]
 pub struct Config {
     pub security: SecurityConfig,
     pub storage: StorageConfig,
+    pub network: NetworkConfig,
+    pub privacy: PrivacyConfig,
+    pub watchers: WatchersConfig,
 }
 
 impl Config {

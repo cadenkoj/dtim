@@ -35,7 +35,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         .with_no_client_auth()
         .with_single_cert(certs, private_key)?;
 
-    let mut crypto_context: crypto::CryptoContext =
+    let crypto_context: crypto::CryptoContext =
         crypto::CryptoContext::new(config.security.key_rotation_days);
 
     let logger = logging::EncryptedLogger::new(
@@ -44,11 +44,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         LevelFilter::Debug,
     )?;
 
-    let mut node = node::Node::new(logger);
-
-    let key_bytes = [1u8; 32];
-    let key = aes_gcm::Key::<aes_gcm::Aes256Gcm>::from_slice(&key_bytes).clone();
-    crypto_context.set_key(key);
+    let node = node::Node::new(logger, config.privacy);
 
     let indicator = ThreatIndicator::new(
         IndicatorType::Ipv4Address,
@@ -59,8 +55,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         None,
     );
 
-    node.add_indicator(indicator.clone());
-
     let encrypted = indicator.encrypt(&crypto_context);
     println!("Encrypted: {:?}", encrypted);
 
@@ -69,6 +63,13 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
 
     let node = Arc::new(Mutex::new(node));
     let crypto_context = Arc::new(Mutex::new(crypto_context));
+
+    {
+        let mut node = node.lock().await;
+        node.add_indicator(indicator.clone());
+        node.bootstrap_peers(config.network.default_peers.clone());
+    }
+
     let server_handle = tokio::spawn(async move {
         api::start_server(node, crypto_context, Arc::new(tls_config), 3030).await
     });

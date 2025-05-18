@@ -5,3 +5,28 @@ tls_key_path = "certs/server.key"
 
 [storage]
 encrypted_logs_path = "data/logs"
+
+[network]
+gossip_interval_seconds = 60
+peers_per_round = 3
+default_peers = [
+    "https://peer1.example.com:3030",
+    "https://peer2.example.com:3030"
+]
+registry_url = "https://registry.dtim.example.com"
+
+[privacy]
+level = "moderate" # Options: "strict", "moderate", "open"
+allow_custom_fields = true
+
+[watchers]
+ufw_log_path = "/var/log/ufw.log"
+fail2ban_log_path = "/var/log/fail2ban.log"
+suricata_log_path = "/var/log/suricata/eve.json"
+zeek_log_dir = "/opt/zeek/logs/current"
+clamav_scan_dir = "/var/tmp/scan"
+virustotal_api_key = "YOUR_API_KEY_HERE"
+nginx_access_log = "/var/log/nginx/access.log"
+nginx_error_log = "/var/log/nginx/error.log"
+apache_access_log = "/var/log/apache2/access.log"
+apache_error_log = "/var/log/apache2/error.log"
