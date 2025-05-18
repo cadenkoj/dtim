@@ -1,8 +1,10 @@
 mod api;
+mod config;
+mod crypto;
 mod models;
 mod node;
-mod config;
 
+use models::{IndicatorType, ThreatIndicator};
 use rustls::pki_types::pem::PemObject;
 use rustls::pki_types::{CertificateDer, PrivateKeyDer};
 use std::sync::Arc;
@@ -23,10 +25,33 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         .with_no_client_auth()
         .with_single_cert(certs, private_key)?;
 
-    let node = Arc::new(Mutex::new(node::Node::new()));
+    let mut node = node::Node::new();
+    let mut crypto_context: crypto::CryptoContext = crypto::CryptoContext::new(config.security.key_rotation_days);
 
+    let key_bytes = [1u8; 32];
+    let key = aes_gcm::Key::<aes_gcm::Aes256Gcm>::from_slice(&key_bytes).clone();
+    crypto_context.set_key(key);
+
+    let indicator = ThreatIndicator::new(
+        IndicatorType::Ipv4Address,
+        "127.0.0.1".to_string(),
+        100,
+        1,
+        vec![],
+    );
+
+    node.add_indicator(indicator.clone());
+
+    let encrypted = indicator.encrypt(&crypto_context);
+    println!("Encrypted: {:?}", encrypted);
+
+    let decrypted = ThreatIndicator::decrypt(&encrypted, &crypto_context);
+    println!("Decrypted: {:?}", decrypted);
+
+    let node = Arc::new(Mutex::new(node));
+    let crypto_context = Arc::new(Mutex::new(crypto_context));
     let server_handle = tokio::spawn(async move {
-        api::start_server(node, Arc::new(tls_config), 3030).await
+        api::start_server(node, crypto_context, Arc::new(tls_config), 3030).await
     });
 
     server_handle.await??;

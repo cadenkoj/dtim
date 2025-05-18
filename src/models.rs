@@ -2,6 +2,8 @@ use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
+use crate::crypto::CryptoContext;
+
 #[derive(Serialize, Deserialize, Clone, Debug)]
 pub struct ThreatIndicator {
     pub id: Uuid,
@@ -36,6 +38,30 @@ impl ThreatIndicator {
 
     pub fn get_id(&self) -> Uuid {
         self.id
+    }
+
+    pub fn encrypt(&self, crypto_context: &CryptoContext) -> EncryptedThreatIndicator {
+        let serialized = serde_json::to_vec(self).expect("Failed to serialize ThreatIndicator");
+        let (ciphertext, nonce, mac) = crypto_context
+            .encrypt(&serialized)
+            .expect("Failed to encrypt data");
+
+        EncryptedThreatIndicator {
+            ciphertext,
+            nonce,
+            mac,
+        }
+    }
+
+    pub fn decrypt(
+        encrypted: &EncryptedThreatIndicator,
+        crypto_context: &CryptoContext,
+    ) -> Result<Self, String> {
+        let decrypted =
+            crypto_context.decrypt(&encrypted.ciphertext, &encrypted.nonce, &encrypted.mac)?;
+
+        serde_json::from_slice(&decrypted)
+            .map_err(|e| format!("Failed to deserialize ThreatIndicator: {}", e))
     }
 }
 

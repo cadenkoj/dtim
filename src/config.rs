@@ -3,6 +3,7 @@ use std::path::PathBuf;
 
 #[derive(Debug, Deserialize)]
 pub struct SecurityConfig {
+    pub key_rotation_days: u64,
     pub tls_cert_path: PathBuf,
     pub tls_key_path: PathBuf,
 }
