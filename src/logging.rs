@@ -5,6 +5,7 @@ use std::fs::{self, OpenOptions};
 use std::io::{self, Write};
 use std::path::PathBuf;
 
+#[derive(Clone)]
 pub struct EncryptedLogger {
     log_path: PathBuf,
     crypto_context: CryptoContext,
@@ -27,7 +28,7 @@ impl EncryptedLogger {
         })
     }
 
-    pub fn log(&self, level: Level, message: &str) -> io::Result<()> {
+    pub fn write_log(&mut self, level: Level, message: &str) -> io::Result<()> {
         let timestamp = Utc::now().to_rfc3339();
         let log_entry = format!("[{}] [{}] {}\n", timestamp, level, message);
 
@@ -97,7 +98,8 @@ impl log::Log for EncryptedLogger {
 
     fn log(&self, record: &Record) {
         if self.enabled(record.metadata()) {
-            if let Err(e) = self.log(record.level(), &format!("{}", record.args())) {
+            let mut logger = self.clone();
+            if let Err(e) = logger.write_log(record.level(), &format!("{}", record.args())) {
                 error!("Failed to write log: {}", e);
             }
         }

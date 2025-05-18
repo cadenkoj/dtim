@@ -1,20 +1,24 @@
-use crate::models::EncryptedThreatIndicator;
-use crate::node::Node;
-use crate::{crypto::CryptoContext, models::ThreatIndicator};
-use axum::extract::Path;
 use axum::{
-    extract::{Json, State},
+    extract::{Json, Path, State},
     http::StatusCode,
     routing::{get, post},
     Router,
 };
 use axum_server::tls_rustls::RustlsConfig;
 use rustls::ServerConfig;
-use std::io;
+use serde::Serialize;
 use std::sync::Arc;
+use std::{io, str::FromStr};
 use tokio::sync::Mutex;
 
-#[derive(serde::Serialize)]
+use crate::node::Node;
+use crate::{crypto::CryptoContext, models::StixBundle};
+use crate::{
+    models::{EncryptedThreatIndicator, ThreatIndicator},
+    uuid::Uuid,
+};
+
+#[derive(Serialize)]
 struct ApiError {
     error: String,
 }
@@ -28,13 +32,37 @@ pub async fn start_server(
     port: u16,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     let app = Router::new()
-        .route("/share", post(share_handler))
-        .route("/indicators", get(get_all_handler))
-        .route("/logs/{date}", get(read_logs_handler))
+        // Peer registry endpoints
+        .route("/api/v1/nodes/register", post(register_node_handler))
+        .route("/api/v1/peers", get(get_peers_handler))
+        // Indicator endpoints
+        .route("/api/v1/indicators/gossip", post(gossip_indicators_handler))
+        .route(
+            "/api/v1/indicators/public",
+            get(get_public_indicators_handler),
+        )
+        .route(
+            "/api/v1/indicators/private",
+            get(get_private_indicators_handler),
+        )
+        .route("/api/v1/indicators/{id}", get(get_indicator_by_id_handler))
+        // Log endpoint
+        .route("/api/v1/logs/{date}", get(read_logs_handler))
+        // TAXII endpoints (minimal)
+        .route("/taxii2/", get(taxii_discovery_handler))
+        .route("/taxii2/root/", get(taxii_api_root_handler))
+        .route("/taxii2/root/collections/", get(taxii_collections_handler))
+        .route(
+            "/taxii2/root/collections/{id}/objects/",
+            get(taxii_get_objects_handler),
+        )
+        .route(
+            "/taxii2/root/collections/{id}/objects/",
+            post(taxii_post_objects_handler),
+        )
         .with_state((node, crypto_context));
 
     let addr = format!("0.0.0.0:{}", port).parse()?;
-
     let tls_config = RustlsConfig::from_config(config);
     axum_server::bind_rustls(addr, tls_config)
         .serve(app.into_make_service())
@@ -49,44 +77,97 @@ pub async fn start_server(
     Ok(())
 }
 
-async fn share_handler(
+// --- Peer Registry Handlers ---
+
+async fn register_node_handler(
+    State((_, _)): State<(Arc<Mutex<Node>>, Arc<Mutex<CryptoContext>>)>,
+    Json(_): Json<serde_json::Value>,
+) -> ApiResponse<serde_json::Value> {
+    // TODO: Implement node registration logic
+    Ok((StatusCode::OK, Json(serde_json::json!({"status": "ok"}))))
+}
+
+async fn get_peers_handler(
+    State((node, _)): State<(Arc<Mutex<Node>>, Arc<Mutex<CryptoContext>>)>,
+) -> ApiResponse<Vec<serde_json::Value>> {
+    // TODO: Implement peer list retrieval
+    let node = node.lock().await;
+    Ok((
+        StatusCode::OK,
+        Json(
+            node.get_peers()
+                .iter()
+                .map(|p| serde_json::json!(p))
+                .collect(),
+        ),
+    ))
+}
+
+// --- Indicator Handlers ---
+
+async fn gossip_indicators_handler(
     State((node, crypto_context)): State<(Arc<Mutex<Node>>, Arc<Mutex<CryptoContext>>)>,
-    Json(encrypted): Json<EncryptedThreatIndicator>,
-) -> ApiResponse<uuid::Uuid> {
+    Json(indicators): Json<Vec<EncryptedThreatIndicator>>,
+) -> ApiResponse<serde_json::Value> {
     let crypto = crypto_context.lock().await;
-    match ThreatIndicator::decrypt(&encrypted, &crypto) {
-        Ok(indicator) => {
-            let mut node = node.lock().await;
-            let id = node.add_indicator(indicator);
-            Ok((StatusCode::OK, Json(id)))
+    let mut node = node.lock().await;
+    let mut count = 0;
+    for encrypted in indicators {
+        if let Ok(indicator) = ThreatIndicator::decrypt(&encrypted, &crypto) {
+            node.add_or_increment_indicator(indicator);
+            count += 1;
         }
-        Err(e) => Err((StatusCode::BAD_REQUEST, Json(ApiError { error: e }))),
+    }
+    Ok((
+        StatusCode::OK,
+        Json(serde_json::json!({ "received": count })),
+    ))
+}
+
+async fn get_public_indicators_handler(
+    State((node, _)): State<(Arc<Mutex<Node>>, Arc<Mutex<CryptoContext>>)>,
+) -> ApiResponse<Vec<serde_json::Value>> {
+    let node = node.lock().await;
+    let indicators = node.list_indicators_by_tlp(crate::models::TlpLevel::White);
+    // Return anonymized (open) view
+    let result: Vec<_> = indicators
+        .iter()
+        .map(|i| i.to_json(node.get_level()))
+        .collect();
+    Ok((StatusCode::OK, Json(result)))
+}
+
+async fn get_private_indicators_handler(
+    State((node, _)): State<(Arc<Mutex<Node>>, Arc<Mutex<CryptoContext>>)>,
+) -> ApiResponse<Vec<serde_json::Value>> {
+    let node = node.lock().await;
+    let indicators = node.list_indicators_by_tlp(crate::models::TlpLevel::Red);
+    // Return anonymized (moderate) view
+    let result: Vec<_> = indicators
+        .iter()
+        .map(|i| i.to_json(node.get_level()))
+        .collect();
+    Ok((StatusCode::OK, Json(result)))
+}
+
+async fn get_indicator_by_id_handler(
+    State((node, _)): State<(Arc<Mutex<Node>>, Arc<Mutex<CryptoContext>>)>,
+    Path(id): Path<String>,
+) -> ApiResponse<serde_json::Value> {
+    let node = node.lock().await;
+    if let Some(indicator) = node.get_indicator_by_id(&Uuid::from_str(&id).unwrap()) {
+        Ok((StatusCode::OK, Json(indicator.to_json(node.get_level()))))
+    } else {
+        Err((
+            StatusCode::NOT_FOUND,
+            Json(ApiError {
+                error: "Indicator not found".to_string(),
+            }),
+        ))
     }
 }
 
-async fn get_all_handler(
-    State((node, crypto_context)): State<(Arc<Mutex<Node>>, Arc<Mutex<CryptoContext>>)>,
-) -> ApiResponse<Vec<EncryptedThreatIndicator>> {
-    let node = node.lock().await;
-    let mut crypto = crypto_context.lock().await;
-    crypto.rotate_key();
-
-    let indicators = node.list_indicators();
-    let encrypted_indicators: Vec<EncryptedThreatIndicator> = indicators
-        .iter()
-        .map(|indicator| {
-            indicator.encrypt(&crypto).map_err(|e| {
-                io::Error::new(
-                    io::ErrorKind::Other,
-                    format!("Failed to encrypt indicator: {}", e),
-                )
-            })
-        })
-        .filter_map(|result| result.ok())
-        .collect();
-
-    Ok((StatusCode::OK, Json(encrypted_indicators)))
-}
+// --- Log Viewer ---
 
 async fn read_logs_handler(
     State((node, _)): State<(Arc<Mutex<Node>>, Arc<Mutex<CryptoContext>>)>,
@@ -102,4 +183,60 @@ async fn read_logs_handler(
             }),
         )),
     }
+}
+
+// --- TAXII Handlers ---
+
+async fn taxii_discovery_handler(
+    State((node, _)): State<(Arc<Mutex<Node>>, Arc<Mutex<CryptoContext>>)>,
+) -> Json<serde_json::Value> {
+    let node = node.lock().await;
+    Json(serde_json::json!({
+        "title": format!("DTIM TAXII Server (node--{})", node.get_id()),
+        "description": "TAXII 2.1 server for sharing threat intelligence",
+        "default": "/taxii2/root/",
+        "api_roots": vec!["/taxii2/root/"]
+    }))
+}
+
+async fn taxii_api_root_handler() -> Json<serde_json::Value> {
+    Json(serde_json::json!({
+        "title": "Default API Root",
+        "description": "Main entry point for DTIM collections",
+        "versions": vec!["taxii-2.1"],
+        "max_content_length": 10485760
+    }))
+}
+
+async fn taxii_collections_handler() -> Json<serde_json::Value> {
+    Json(serde_json::json!({
+        "collections": [
+            {
+                "id": "indicators",
+                "title": "Threat Indicators",
+                "description": "Collection of shared threat indicators",
+                "can_read": true,
+                "can_write": true
+            }
+        ]
+    }))
+}
+
+async fn taxii_get_objects_handler(
+    State((node, _)): State<(Arc<Mutex<Node>>, Arc<Mutex<CryptoContext>>)>,
+    Path(_collection_id): Path<String>,
+) -> Json<serde_json::Value> {
+    let node = node.lock().await;
+    let stix_objects = node.list_objects_by_tlp(crate::models::TlpLevel::White);
+    let bundle = StixBundle::new(stix_objects);
+    Json(bundle.to_stix())
+}
+
+async fn taxii_post_objects_handler(
+    State((_, _)): State<(Arc<Mutex<Node>>, Arc<Mutex<CryptoContext>>)>,
+    Path(_collection_id): Path<String>,
+    Json(_): Json<serde_json::Value>,
+) -> Json<serde_json::Value> {
+    // TODO: Parse STIX objects into ThreatIndicators
+    Json(serde_json::json!({ "status": "not implemented" }))
 }

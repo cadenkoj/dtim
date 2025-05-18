@@ -4,9 +4,10 @@ mod crypto;
 mod logging;
 mod models;
 mod node;
+mod uuid;
 
 use log::LevelFilter;
-use models::{AccessScope, IndicatorType, ThreatIndicator};
+use models::{IndicatorType, ThreatIndicator};
 use rustls::pki_types::pem::PemObject;
 use rustls::pki_types::{CertificateDer, PrivateKeyDer};
 use std::sync::Arc;
@@ -35,8 +36,14 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         .with_no_client_auth()
         .with_single_cert(certs, private_key)?;
 
-    let crypto_context: crypto::CryptoContext =
+    let mut crypto_context: crypto::CryptoContext =
         crypto::CryptoContext::new(config.security.key_rotation_days);
+
+    if !crypto_context.keypair_exists() {
+        crypto_context.generate_and_save_keypair()?;
+    }
+
+    let keypair = crypto_context.load_keypair()?;
 
     let logger = logging::EncryptedLogger::new(
         config.storage.encrypted_logs_path.clone(),
@@ -44,18 +51,18 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         LevelFilter::Debug,
     )?;
 
-    let node = node::Node::new(logger, config.privacy);
+    let node = node::Node::new(logger, config.privacy, keypair);
 
     let indicator = ThreatIndicator::new(
         IndicatorType::Ipv4Address,
         "127.0.0.1".to_string(),
         100,
-        vec![],
-        AccessScope::Private,
+        vec!["malicious-activity".to_string()],
+        models::TlpLevel::White,
         None,
     );
 
-    let encrypted = indicator.encrypt(&crypto_context);
+    let encrypted = indicator.encrypt(&mut crypto_context);
     println!("Encrypted: {:?}", encrypted);
 
     let decrypted = ThreatIndicator::decrypt(&encrypted.unwrap(), &crypto_context);

@@ -2,7 +2,14 @@ use aes_gcm::aead::rand_core::RngCore;
 use aes_gcm::aead::{Aead, KeyInit, OsRng};
 use aes_gcm::{Aes256Gcm, Key, Nonce};
 use base64::prelude::*;
+use ed25519_dalek::{SecretKey, Signer, SigningKey, VerifyingKey};
+use std::fs::{self, File};
+use std::io::{Read, Write};
+use std::path::Path;
 use std::time::{SystemTime, UNIX_EPOCH};
+
+const PRIVATE_KEY_PATH: &str = "data/keys/node.key";
+const PUBLIC_KEY_PATH: &str = "data/keys/node.pub";
 
 #[derive(Clone)]
 pub struct CryptoContext {
@@ -47,7 +54,8 @@ impl CryptoContext {
         Key::<Aes256Gcm>::from_slice(&key_bytes).clone()
     }
 
-    pub fn encrypt(&self, plaintext: &[u8]) -> Result<(String, String, String), String> {
+    pub fn encrypt(&mut self, plaintext: &[u8]) -> Result<(String, String, String), String> {
+        self.rotate_key();
         let cipher = Aes256Gcm::new(&self.current_key);
 
         let mut nonce_bytes = [0u8; 12];
@@ -101,5 +109,46 @@ impl CryptoContext {
                 Err("Decryption failed and no previous key available".to_string())
             }
         })
+    }
+
+    pub fn keypair_exists(&self) -> bool {
+        Path::new(PRIVATE_KEY_PATH).exists() && Path::new(PUBLIC_KEY_PATH).exists()
+    }
+
+    pub fn generate_and_save_keypair(&self) -> std::io::Result<()> {
+        if let Some(parent) = Path::new(PRIVATE_KEY_PATH).parent() {
+            fs::create_dir_all(parent)?;
+        }
+
+        if !Path::new(PRIVATE_KEY_PATH).exists() || !Path::new(PUBLIC_KEY_PATH).exists() {
+            println!("Keypair already exists, loading...");
+        } else {
+            println!("Generating new keypair...");
+        }
+
+        let mut csprng = OsRng;
+        let signing_key: SigningKey = SigningKey::generate(&mut csprng);
+
+        let mut priv_file = File::create(PRIVATE_KEY_PATH)?;
+        priv_file.write_all(&signing_key.to_bytes())?;
+
+        let mut pub_file = File::create(PUBLIC_KEY_PATH)?;
+        pub_file.write_all(&signing_key.verifying_key().to_bytes())?;
+
+        Ok(())
+    }
+
+    pub fn load_keypair(&self) -> std::io::Result<(SigningKey, VerifyingKey)> {
+        let mut priv_bytes = [0u8; ed25519_dalek::SECRET_KEY_LENGTH];
+        let mut pub_bytes = [0u8; ed25519_dalek::PUBLIC_KEY_LENGTH];
+
+        File::open(PRIVATE_KEY_PATH)?.read_exact(&mut priv_bytes)?;
+        File::open(PUBLIC_KEY_PATH)?.read_exact(&mut pub_bytes)?;
+
+        let signing_key = SigningKey::from_bytes(&priv_bytes);
+        let public = VerifyingKey::from_bytes(&pub_bytes)
+            .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
+
+        Ok((signing_key, public))
     }
 }

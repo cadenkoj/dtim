@@ -4,13 +4,12 @@ use std::{
     net::IpAddr,
 };
 
-use crate::crypto::CryptoContext;
+use crate::{crypto::CryptoContext, uuid::Uuid};
 use chrono::{DateTime, Utc};
 use regex::Regex;
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 use std::hash::{Hash, Hasher};
-use uuid::{ContextV7, Timestamp, Uuid};
 
 #[derive(Serialize, Deserialize, Clone, Debug)]
 pub struct ThreatIndicator {
@@ -22,8 +21,10 @@ pub struct ThreatIndicator {
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
     pub tags: Vec<String>,
-    pub access_scope: AccessScope,
+    pub tlp: TlpLevel,
+    pub recipients: Option<Vec<String>>, // Only used for TLP:RED
     pub custom_fields: Option<HashMap<String, serde_json::Value>>,
+    pub marking_definitions: Vec<MarkingDefinition>,
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug)]
@@ -34,25 +35,19 @@ pub struct EncryptedThreatIndicator {
 }
 
 impl ThreatIndicator {
-    const TIMESTAMP_CONTEXT: ContextV7 = ContextV7::new();
-
     pub fn new(
         indicator_type: IndicatorType,
         value: String,
         confidence: u8,
         tags: Vec<String>,
-        access_scope: AccessScope,
+        tlp: TlpLevel,
         custom_fields: Option<HashMap<String, serde_json::Value>>,
     ) -> Self {
         let now = Utc::now();
-        let ts = Timestamp::from_unix(
-            Self::TIMESTAMP_CONTEXT,
-            now.timestamp() as u64,
-            now.timestamp_subsec_nanos(),
-        );
+        let marking_definition = MarkingDefinition::new("tlp".to_string(), tlp.to_string());
 
         ThreatIndicator {
-            id: Uuid::new_v7(ts),
+            id: Uuid::new_v7_from_datetime(now),
             indicator_type,
             value,
             confidence,
@@ -60,8 +55,10 @@ impl ThreatIndicator {
             created_at: now,
             updated_at: now,
             tags,
-            access_scope,
+            tlp,
+            recipients: None, // TODO: Handle recipients for TLP:RED
             custom_fields,
+            marking_definitions: vec![marking_definition],
         }
     }
 
@@ -71,7 +68,7 @@ impl ThreatIndicator {
 
     pub fn encrypt(
         &self,
-        crypto_context: &CryptoContext,
+        crypto_context: &mut CryptoContext,
     ) -> Result<EncryptedThreatIndicator, io::Error> {
         let serialized = serde_json::to_vec(self).expect("Failed to serialize ThreatIndicator");
         let (ciphertext, nonce, mac) = crypto_context.encrypt(&serialized).map_err(|e| {
@@ -131,9 +128,9 @@ impl ThreatIndicator {
                     .iter()
                     .map(|(alg, val)| format!("file:hashes.'{}' = '{}'", alg, val))
                     .collect();
-                format!("{}", patterns.join(" OR "))
+                format!("[{}]", patterns.join(" OR "))
             }
-            _ => format!("{}:value = '{}'", self.indicator_type, self.value),
+            _ => format!("[{}:value = '{}']", self.indicator_type, self.value),
         }
     }
 
@@ -157,13 +154,17 @@ impl ThreatIndicator {
                 json["updated_at"] = json!(self.updated_at);
                 json["tags"] = json!(self.tags);
                 json["custom_fields"] = json!(self.custom_fields);
-                json["access_scope"] = json!(self.access_scope);
+                json["tlp"] = json!(self.tlp);
                 json
             }
         }
     }
 
-    pub fn to_stix(&self, privacy_level: PrivacyLevel) -> Option<serde_json::Value> {
+    pub fn to_stix(
+        &self,
+        privacy_level: PrivacyLevel,
+        allow_custom_fields: bool,
+    ) -> Option<serde_json::Value> {
         if let IndicatorType::Other(_) = self.indicator_type {
             log::warn!(
                 "Cannot convert unknown indicator type to STIX: {:?}",
@@ -176,6 +177,7 @@ impl ThreatIndicator {
             "type": "indicator",
             "id": format!("indicator--{}", self.id),
             "pattern": self.get_pattern(),
+            "pattern_type": "stix",
         });
 
         match privacy_level {
@@ -191,10 +193,19 @@ impl ThreatIndicator {
                 stix_obj["modified"] = json!(self.updated_at);
                 stix_obj["confidence"] = json!(self.confidence);
                 stix_obj["labels"] = json!(self.tags);
-                stix_obj["extensions"] = json!(self.custom_fields);
-                stix_obj["granular_markings"] = json!([
-                    {"marking_ref": self.access_scope}
-                ]);
+                if allow_custom_fields && self.custom_fields.is_some() {
+                    stix_obj["extensions"] = json!(self.custom_fields);
+                }
+                stix_obj["granular_markings"] = json!(self
+                    .marking_definitions
+                    .iter()
+                    .map(|md| {
+                        json!({
+                            "marking_ref": md.get_marking_ref(),
+                            "selectors": vec!["pattern"]
+                        })
+                    })
+                    .collect::<Vec<_>>());
                 Some(stix_obj)
             }
         }
@@ -207,7 +218,7 @@ impl PartialEq for ThreatIndicator {
             && self.value == other.value
             && BTreeSet::<_>::from_iter(self.tags.iter())
                 == BTreeSet::<_>::from_iter(other.tags.iter())
-            && self.access_scope == other.access_scope
+            && self.tlp == other.tlp
             && self.custom_fields == other.custom_fields
     }
 }
@@ -223,7 +234,7 @@ impl std::hash::Hash for ThreatIndicator {
         for tag in sorted_tags {
             tag.hash(state);
         }
-        self.access_scope.hash(state);
+        self.tlp.hash(state);
         if let Some(fields) = &self.custom_fields {
             for (k, v) in fields {
                 k.hash(state);
@@ -233,19 +244,83 @@ impl std::hash::Hash for ThreatIndicator {
     }
 }
 
-#[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Hash)]
-pub enum AccessScope {
-    Private,
-    Public,
-    Group(String),
+#[derive(Serialize, Deserialize, Debug, Clone)]
+pub struct MarkingDefinition {
+    id: Uuid,
+    created_at: DateTime<Utc>,
+    definition_type: String,
+    definition: serde_json::Value,
 }
 
-impl fmt::Display for AccessScope {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+impl MarkingDefinition {
+    pub fn new(definition_type: String, value: String) -> Self {
+        let now = Utc::now();
+
+        MarkingDefinition {
+            id: Uuid::new_v7_from_datetime(now),
+            created_at: now,
+            definition_type: definition_type.clone(),
+            definition: json!({
+                definition_type: value,
+            }),
+        }
+    }
+
+    pub fn get_marking_ref(&self) -> String {
+        format!("marking-definition--{}", self.id)
+    }
+
+    pub fn to_stix(&self) -> serde_json::Value {
+        json!({
+            "type": "marking-definition",
+            "id": self.get_marking_ref(),
+            "created": self.created_at,
+            "definition_type": self.definition_type,
+            "definition": self.definition,
+        })
+    }
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone)]
+pub struct StixBundle {
+    pub id: String,
+    pub objects: Vec<serde_json::Value>,
+}
+
+impl StixBundle {
+    pub fn new(objects: Vec<serde_json::Value>) -> Self {
+        let now = Utc::now();
+
+        StixBundle {
+            id: format!("bundle--{}", Uuid::new_v7_from_datetime(now)),
+            objects,
+        }
+    }
+
+    pub fn to_stix(&self) -> serde_json::Value {
+        json!({
+            "type": "bundle",
+            "id": self.id,
+            "objects": self.objects,
+        })
+    }
+}
+
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq, Hash)]
+pub enum TlpLevel {
+    Red,
+    Amber,
+    Green,
+    White,
+}
+
+impl std::fmt::Display for TlpLevel {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            AccessScope::Private => write!(f, "private"),
-            AccessScope::Public => write!(f, "public"),
-            AccessScope::Group(g) => write!(f, "group:{}", g),
+            TlpLevel::Red => write!(f, "red"),
+            TlpLevel::Amber => write!(f, "amber"),
+            TlpLevel::Green => write!(f, "green"),
+            TlpLevel::White => write!(f, "white"),
         }
     }
 }
