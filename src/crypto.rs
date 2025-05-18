@@ -1,6 +1,6 @@
 use aes_gcm::aead::rand_core::RngCore;
 use aes_gcm::aead::{Aead, KeyInit, OsRng};
-use aes_gcm::{Aes256Gcm, Nonce, Key};
+use aes_gcm::{Aes256Gcm, Key, Nonce};
 use base64::prelude::*;
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -19,7 +19,7 @@ impl CryptoContext {
             .duration_since(UNIX_EPOCH)
             .unwrap()
             .as_secs();
-        
+
         CryptoContext {
             current_key,
             previous_key: None,
@@ -37,7 +37,7 @@ impl CryptoContext {
             .duration_since(UNIX_EPOCH)
             .unwrap()
             .as_secs();
-        
+
         if now - self.key_rotation_time >= self.rotation_interval {
             self.previous_key = Some(self.current_key.clone());
             self.current_key = Self::generate_key();
@@ -53,7 +53,7 @@ impl CryptoContext {
 
     pub fn encrypt(&self, plaintext: &[u8]) -> Result<(String, String, String), String> {
         let cipher = Aes256Gcm::new(&self.current_key);
-        
+
         let mut nonce_bytes = [0u8; 12];
         OsRng.fill_bytes(&mut nonce_bytes);
         let nonce = Nonce::from_slice(&nonce_bytes);
@@ -64,19 +64,27 @@ impl CryptoContext {
                 Ok((
                     BASE64_STANDARD.encode(ciphertext_and_tag),
                     BASE64_STANDARD.encode(nonce_bytes),
-                    BASE64_STANDARD.encode(tag)
+                    BASE64_STANDARD.encode(tag),
                 ))
             }
-            Err(_) => Err("Encryption failure".to_string())
+            Err(_) => Err("Encryption failure".to_string()),
         }
     }
 
-    pub fn decrypt(&self, ciphertext_b64: &str, nonce_b64: &str, tag_b64: &str) -> Result<Vec<u8>, String> {
-        let mut ciphertext = BASE64_STANDARD.decode(ciphertext_b64)
+    pub fn decrypt(
+        &self,
+        ciphertext_b64: &str,
+        nonce_b64: &str,
+        tag_b64: &str,
+    ) -> Result<Vec<u8>, String> {
+        let mut ciphertext = BASE64_STANDARD
+            .decode(ciphertext_b64)
             .map_err(|_| "Invalid base64 ciphertext")?;
-        let nonce_bytes = BASE64_STANDARD.decode(nonce_b64)
+        let nonce_bytes = BASE64_STANDARD
+            .decode(nonce_b64)
             .map_err(|_| "Invalid base64 nonce")?;
-        let tag = BASE64_STANDARD.decode(tag_b64)
+        let tag = BASE64_STANDARD
+            .decode(tag_b64)
             .map_err(|_| "Invalid base64 tag")?;
 
         ciphertext.extend_from_slice(&tag);
@@ -85,7 +93,9 @@ impl CryptoContext {
 
         let try_decrypt = |key: &Key<Aes256Gcm>| {
             let cipher = Aes256Gcm::new(key);
-            cipher.decrypt(nonce, ciphertext.as_ref()).map_err(|_| "Decryption failed".to_string())
+            cipher
+                .decrypt(nonce, ciphertext.as_ref())
+                .map_err(|_| "Decryption failed".to_string())
         };
 
         try_decrypt(&self.current_key).or_else(|_| {

@@ -10,6 +10,7 @@ use axum::{
 };
 use axum_server::tls_rustls::RustlsConfig;
 use rustls::ServerConfig;
+use std::io;
 use std::sync::Arc;
 use tokio::sync::Mutex;
 
@@ -38,7 +39,12 @@ pub async fn start_server(
     axum_server::bind_rustls(addr, tls_config)
         .serve(app.into_make_service())
         .await
-        .unwrap();
+        .map_err(|e| {
+            io::Error::new(
+                io::ErrorKind::Other,
+                format!("Failed to start server: {}", e),
+            )
+        })?;
 
     Ok(())
 }
@@ -68,7 +74,15 @@ async fn get_all_handler(
     let indicators = node.list_indicators();
     let encrypted_indicators: Vec<EncryptedThreatIndicator> = indicators
         .iter()
-        .map(|indicator| indicator.encrypt(&crypto))
+        .map(|indicator| {
+            indicator.encrypt(&crypto).map_err(|e| {
+                io::Error::new(
+                    io::ErrorKind::Other,
+                    format!("Failed to encrypt indicator: {}", e),
+                )
+            })
+        })
+        .filter_map(|result| result.ok())
         .collect();
 
     Ok((StatusCode::OK, Json(encrypted_indicators)))

@@ -20,7 +20,7 @@ impl Node {
     pub fn bootstrap_peers(&mut self, peers: Vec<String>) {
         for peer in peers {
             self.peers.push(peer.clone());
-            self.logger
+            let _ = self.logger
                 .log(log::Level::Info, &format!("Bootstrapping peer: {}", peer));
         }
     }
@@ -28,7 +28,7 @@ impl Node {
     pub fn add_indicator(&mut self, indicator: ThreatIndicator) -> Uuid {
         let id = indicator.get_id();
         self.indicators.insert(id, indicator.clone());
-        self.logger.log(
+        let _ = self.logger.log(
             log::Level::Info,
             &format!("Adding indicator: {:?}", indicator),
         );

@@ -1,8 +1,16 @@
-use chrono::{DateTime, Utc};
-use serde::{Deserialize, Serialize};
-use uuid::Uuid;
+use std::{
+    collections::{BTreeSet, HashMap},
+    fmt, io,
+    net::IpAddr,
+};
 
 use crate::crypto::CryptoContext;
+use chrono::{DateTime, Utc};
+use regex::Regex;
+use serde::{Deserialize, Serialize};
+use serde_json::json;
+use std::hash::{Hash, Hasher};
+use uuid::{ContextV7, Timestamp, Uuid};
 
 #[derive(Serialize, Deserialize, Clone, Debug)]
 pub struct ThreatIndicator {
@@ -14,55 +22,8 @@ pub struct ThreatIndicator {
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
     pub tags: Vec<String>,
-}
-
-impl ThreatIndicator {
-    pub fn new(
-        indicator_type: IndicatorType,
-        value: String,
-        confidence: u8,
-        sightings: u32,
-        tags: Vec<String>,
-    ) -> Self {
-        ThreatIndicator {
-            id: Uuid::now_v7(),
-            indicator_type,
-            value,
-            confidence,
-            sightings,
-            created_at: Utc::now(),
-            updated_at: Utc::now(),
-            tags,
-        }
-    }
-
-    pub fn get_id(&self) -> Uuid {
-        self.id
-    }
-
-    pub fn encrypt(&self, crypto_context: &CryptoContext) -> EncryptedThreatIndicator {
-        let serialized = serde_json::to_vec(self).expect("Failed to serialize ThreatIndicator");
-        let (ciphertext, nonce, mac) = crypto_context
-            .encrypt(&serialized)
-            .expect("Failed to encrypt data");
-
-        EncryptedThreatIndicator {
-            ciphertext,
-            nonce,
-            mac,
-        }
-    }
-
-    pub fn decrypt(
-        encrypted: &EncryptedThreatIndicator,
-        crypto_context: &CryptoContext,
-    ) -> Result<Self, String> {
-        let decrypted =
-            crypto_context.decrypt(&encrypted.ciphertext, &encrypted.nonce, &encrypted.mac)?;
-
-        serde_json::from_slice(&decrypted)
-            .map_err(|e| format!("Failed to deserialize ThreatIndicator: {}", e))
-    }
+    pub access_scope: AccessScope,
+    pub custom_fields: Option<HashMap<String, serde_json::Value>>,
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug)]
@@ -72,13 +33,279 @@ pub struct EncryptedThreatIndicator {
     mac: String,
 }
 
-#[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
+impl ThreatIndicator {
+    const TIMESTAMP_CONTEXT: ContextV7 = ContextV7::new();
+
+    pub fn new(
+        indicator_type: IndicatorType,
+        value: String,
+        confidence: u8,
+        tags: Vec<String>,
+        access_scope: AccessScope,
+        custom_fields: Option<HashMap<String, serde_json::Value>>,
+    ) -> Self {
+        let now = Utc::now();
+        let ts = Timestamp::from_unix(
+            Self::TIMESTAMP_CONTEXT,
+            now.timestamp() as u64,
+            now.timestamp_subsec_nanos(),
+        );
+
+        ThreatIndicator {
+            id: Uuid::new_v7(ts),
+            indicator_type,
+            value,
+            confidence,
+            sightings: 1,
+            created_at: now,
+            updated_at: now,
+            tags,
+            access_scope,
+            custom_fields,
+        }
+    }
+
+    pub fn get_id(&self) -> Uuid {
+        self.id
+    }
+
+    pub fn encrypt(
+        &self,
+        crypto_context: &CryptoContext,
+    ) -> Result<EncryptedThreatIndicator, io::Error> {
+        let serialized = serde_json::to_vec(self).expect("Failed to serialize ThreatIndicator");
+        let (ciphertext, nonce, mac) = crypto_context.encrypt(&serialized).map_err(|e| {
+            io::Error::new(io::ErrorKind::Other, format!("Encryption failed: {}", e))
+        })?;
+
+        Ok(EncryptedThreatIndicator {
+            ciphertext,
+            nonce,
+            mac,
+        })
+    }
+
+    pub fn decrypt(
+        encrypted: &EncryptedThreatIndicator,
+        crypto_context: &CryptoContext,
+    ) -> Result<Self, String> {
+        let decrypted = crypto_context
+            .decrypt(&encrypted.ciphertext, &encrypted.nonce, &encrypted.mac)
+            .map_err(|e| format!("Decryption failed: {}", e))?;
+
+        serde_json::from_slice(&decrypted)
+            .map_err(|e| format!("Failed to deserialize ThreatIndicator: {}", e))
+    }
+
+    pub fn infer_type(value: &str) -> IndicatorType {
+        if let Ok(ip) = value.parse::<IpAddr>() {
+            return match ip {
+                IpAddr::V4(_) => IndicatorType::Ipv4Address,
+                IpAddr::V6(_) => IndicatorType::Ipv6Address,
+            };
+        }
+
+        let url_re = Regex::new(r"^https?://(?:www\.)?[-a-zA-Z0-9@:%._\+~#=]{1,256}\.[a-zA-Z0-9()]{1,6}\b(?:[-a-zA-Z0-9()@:%_\+.~#?&/=]*)$").unwrap();
+        if url_re.is_match(value) {
+            return IndicatorType::Url;
+        }
+
+        let domain_re = Regex::new(r"^([a-zA-Z0-9-]+\.)+[a-zA-Z]{2,}$").unwrap();
+        if domain_re.is_match(value) {
+            return IndicatorType::DomainName;
+        }
+
+        let email_re = Regex::new(r"^\S+@\S+\.\S+$").unwrap();
+        if email_re.is_match(value) {
+            return IndicatorType::EmailAddress;
+        }
+
+        IndicatorType::Other(value.to_string())
+    }
+
+    pub fn get_pattern(&self) -> String {
+        match &self.indicator_type {
+            IndicatorType::File(hashes) => {
+                let patterns: Vec<String> = hashes
+                    .0
+                    .iter()
+                    .map(|(alg, val)| format!("file:hashes.'{}' = '{}'", alg, val))
+                    .collect();
+                format!("{}", patterns.join(" OR "))
+            }
+            _ => format!("{}:value = '{}'", self.indicator_type, self.value),
+        }
+    }
+
+    pub fn anonymized(&self, level: PrivacyLevel) -> serde_json::Value {
+        match level {
+            PrivacyLevel::Strict => json!({
+                "indicator_type": self.indicator_type,
+                "value": self.value,
+            }),
+            PrivacyLevel::Moderate => json!({
+                "indicator_type": self.indicator_type,
+                "value": self.value,
+                "confidence": self.confidence,
+                "created_at": self.created_at,
+                "updated_at": self.updated_at,
+            }),
+            PrivacyLevel::Open => json!({
+                "indicator_type": self.indicator_type,
+                "value": self.value,
+                "confidence": self.confidence,
+                "created_at": self.created_at,
+                "updated_at": self.updated_at,
+                "tags": self.tags,
+                "custom_fields": self.custom_fields,
+                "access_scope": self.access_scope,
+            }),
+        }
+    }
+
+    pub fn to_stix(&self) -> Option<serde_json::Value> {
+        if let IndicatorType::Other(_) = self.indicator_type {
+            log::warn!(
+                "Cannot convert unknown indicator type to STIX: {:?}",
+                self.value
+            );
+            return None;
+        }
+
+        Some(json!({
+            "type": "indicator",
+            "id": format!("indicator--{}", self.id),
+            "created": self.created_at,
+            "modified": self.updated_at,
+            "labels": self.tags,
+            "confidence": self.confidence,
+            "pattern": self.get_pattern(),
+            "extensions": self.custom_fields,
+            "granular_markings": [
+                {"marking_ref": self.access_scope}
+            ]
+        }))
+    }
+}
+
+impl PartialEq for ThreatIndicator {
+    fn eq(&self, other: &Self) -> bool {
+        self.indicator_type == other.indicator_type
+            && self.value == other.value
+            && BTreeSet::<_>::from_iter(self.tags.iter())
+                == BTreeSet::<_>::from_iter(other.tags.iter())
+            && self.access_scope == other.access_scope
+            && self.custom_fields == other.custom_fields
+    }
+}
+
+impl Eq for ThreatIndicator {}
+
+impl std::hash::Hash for ThreatIndicator {
+    fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
+        self.indicator_type.hash(state);
+        self.value.hash(state);
+        let mut sorted_tags: Vec<_> = self.tags.iter().collect();
+        sorted_tags.sort();
+        for tag in sorted_tags {
+            tag.hash(state);
+        }
+        self.access_scope.hash(state);
+        if let Some(fields) = &self.custom_fields {
+            for (k, v) in fields {
+                k.hash(state);
+                v.to_string().hash(state);
+            }
+        }
+    }
+}
+
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Hash)]
+pub enum AccessScope {
+    Private,
+    Public,
+    Group(String),
+}
+
+impl fmt::Display for AccessScope {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            AccessScope::Private => write!(f, "private"),
+            AccessScope::Public => write!(f, "public"),
+            AccessScope::Group(g) => write!(f, "group:{}", g),
+        }
+    }
+}
+
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
+pub struct FileHashes(pub HashMap<HashAlgorithm, String>);
+
+impl Hash for FileHashes {
+    fn hash<H: Hasher>(&self, state: &mut H) {
+        for (k, v) in &self.0 {
+            k.hash(state);
+            v.hash(state);
+        }
+    }
+}
+
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq, Hash)]
+pub enum HashAlgorithm {
+    MD5,
+    SHA1,
+    SHA256,
+    SHA512,
+}
+
+impl fmt::Display for HashAlgorithm {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            HashAlgorithm::MD5 => write!(f, "MD5"),
+            HashAlgorithm::SHA1 => write!(f, "SHA-1"),
+            HashAlgorithm::SHA256 => write!(f, "SHA-256"),
+            HashAlgorithm::SHA512 => write!(f, "SHA-512"),
+        }
+    }
+}
+
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Hash)]
 pub enum IndicatorType {
     Ipv4Address,
     Ipv6Address,
     DomainName,
     Url,
-    File,
+    File(FileHashes),
     EmailAddress,
     Other(String),
+}
+
+impl fmt::Display for IndicatorType {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            IndicatorType::Ipv4Address => write!(f, "ipv4-addr"),
+            IndicatorType::Ipv6Address => write!(f, "ipv6-addr"),
+            IndicatorType::DomainName => write!(f, "domain-name"),
+            IndicatorType::Url => write!(f, "url"),
+            IndicatorType::File(_) => write!(f, "file"),
+            IndicatorType::EmailAddress => write!(f, "email-addr"),
+            IndicatorType::Other(s) => write!(f, "{}", s),
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum PrivacyLevel {
+    Strict,
+    Moderate,
+    Open,
+}
+
+impl fmt::Display for PrivacyLevel {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            PrivacyLevel::Strict => write!(f, "strict"),
+            PrivacyLevel::Moderate => write!(f, "moderate"),
+            PrivacyLevel::Open => write!(f, "open"),
+        }
+    }
 }

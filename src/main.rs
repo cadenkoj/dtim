@@ -6,7 +6,7 @@ mod models;
 mod node;
 
 use log::LevelFilter;
-use models::{IndicatorType, ThreatIndicator};
+use models::{AccessScope, IndicatorType, ThreatIndicator};
 use rustls::pki_types::pem::PemObject;
 use rustls::pki_types::{CertificateDer, PrivateKeyDer};
 use std::sync::Arc;
@@ -54,8 +54,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         IndicatorType::Ipv4Address,
         "127.0.0.1".to_string(),
         100,
-        1,
         vec![],
+        AccessScope::Private,
+        None,
     );
 
     node.add_indicator(indicator.clone());
@@ -63,7 +64,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     let encrypted = indicator.encrypt(&crypto_context);
     println!("Encrypted: {:?}", encrypted);
 
-    let decrypted = ThreatIndicator::decrypt(&encrypted, &crypto_context);
+    let decrypted = ThreatIndicator::decrypt(&encrypted.unwrap(), &crypto_context);
     println!("Decrypted: {:?}", decrypted);
 
     let node = Arc::new(Mutex::new(node));

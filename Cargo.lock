@@ -537,6 +537,7 @@ dependencies = [
  "config",
  "env_logger",
  "log",
+ "regex",
  "rustls",
  "serde",
  "serde_json",
