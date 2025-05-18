@@ -9,8 +9,14 @@ pub struct SecurityConfig {
 }
 
 #[derive(Debug, Deserialize)]
+pub struct StorageConfig {
+    pub encrypted_logs_path: PathBuf,
+}
+
+#[derive(Debug, Deserialize)]
 pub struct Config {
     pub security: SecurityConfig,
+    pub storage: StorageConfig,
 }
 
 impl Config {

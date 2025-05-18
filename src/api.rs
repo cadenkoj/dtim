@@ -1,6 +1,7 @@
 use crate::models::EncryptedThreatIndicator;
 use crate::node::Node;
 use crate::{crypto::CryptoContext, models::ThreatIndicator};
+use axum::extract::Path;
 use axum::{
     extract::{Json, State},
     http::StatusCode,
@@ -28,6 +29,7 @@ pub async fn start_server(
     let app = Router::new()
         .route("/share", post(share_handler))
         .route("/indicators", get(get_all_handler))
+        .route("/logs/{date}", get(read_logs_handler))
         .with_state((node, crypto_context));
 
     let addr = format!("0.0.0.0:{}", port).parse()?;
@@ -70,4 +72,20 @@ async fn get_all_handler(
         .collect();
 
     Ok((StatusCode::OK, Json(encrypted_indicators)))
+}
+
+async fn read_logs_handler(
+    State((node, _)): State<(Arc<Mutex<Node>>, Arc<Mutex<CryptoContext>>)>,
+    Path(date): Path<String>,
+) -> ApiResponse<Vec<String>> {
+    let node = node.lock().await;
+    match node.read_logs(&date) {
+        Ok(logs) => Ok((StatusCode::OK, Json(logs))),
+        Err(e) => Err((
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(ApiError {
+                error: format!("Failed to read logs: {}", e),
+            }),
+        )),
+    }
 }

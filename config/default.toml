@@ -2,3 +2,6 @@
 key_rotation_days = 7
 tls_cert_path = "certs/server.crt"
 tls_key_path = "certs/server.key"
+
+[storage]
+encrypted_logs_path = "data/logs"

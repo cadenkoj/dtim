@@ -1,17 +1,27 @@
 mod api;
 mod config;
 mod crypto;
+mod logging;
 mod models;
 mod node;
 
+use log::LevelFilter;
 use models::{IndicatorType, ThreatIndicator};
 use rustls::pki_types::pem::PemObject;
 use rustls::pki_types::{CertificateDer, PrivateKeyDer};
 use std::sync::Arc;
 use tokio::sync::Mutex;
 
+fn init_logging() {
+    env_logger::Builder::new()
+        .filter_level(LevelFilter::Debug)
+        .format_timestamp_millis()
+        .init();
+}
+
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    init_logging();
     let config = config::Config::load()?;
 
     let certs = CertificateDer::pem_file_iter(config.security.tls_cert_path.clone())
@@ -25,8 +35,16 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         .with_no_client_auth()
         .with_single_cert(certs, private_key)?;
 
-    let mut node = node::Node::new();
-    let mut crypto_context: crypto::CryptoContext = crypto::CryptoContext::new(config.security.key_rotation_days);
+    let mut crypto_context: crypto::CryptoContext =
+        crypto::CryptoContext::new(config.security.key_rotation_days);
+
+    let logger = logging::EncryptedLogger::new(
+        config.storage.encrypted_logs_path.clone(),
+        crypto_context.clone(),
+        LevelFilter::Debug,
+    )?;
+
+    let mut node = node::Node::new(logger);
 
     let key_bytes = [1u8; 32];
     let key = aes_gcm::Key::<aes_gcm::Aes256Gcm>::from_slice(&key_bytes).clone();
