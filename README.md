@@ -1,5 +1,5 @@
-
 # Distributed Threat Intelligence Mesh (DTIM)
+
 **Design Document**
 
 > [!CAUTION]
@@ -80,17 +80,18 @@ apache_error_log = "/var/log/apache2/error.log"
 ```
 
 **Recommendations:**
-- **[security]:**  
+
+- **[security]:**
   - Use strong, unique TLS keys per node.
   - Rotate keys regularly (default: 7 days).
-- **[network]:**  
+- **[network]:**
   - `gossip_interval_seconds` default: 60 (configurable).
   - `peers_per_round` default: 3 (configurable).
   - All peers must be manually approved.
-- **[privacy]:**  
+- **[privacy]:**
   - Default privacy level: "moderate".
   - Allow custom fields for extensibility.
-- **[watchers]:**  
+- **[watchers]:**
   - Enable only the log sources relevant to your environment.
 
 ---
@@ -108,7 +109,8 @@ apache_error_log = "/var/log/apache2/error.log"
   "modified": "2025-05-17T16:00:00Z",
   "sightings": 3,
   "tags": ["malware"],
-  "access_scope": "private",
+  "tlp": "red",
+  "recipients": ["node-2"],
   "custom_fields": {
     "source": "ufw",
     "threat_category": "bruteforce"
@@ -117,7 +119,7 @@ apache_error_log = "/var/log/apache2/error.log"
 ```
 
 - **STIX/TAXII compatibility** is supported via an adapter (see below).
-- **Access scope**: "private" by default; can be set to "public" or "group:\<name>".
+- **TLP**: "white", "green", "amber", "red"
 
 ---
 
@@ -126,7 +128,7 @@ apache_error_log = "/var/log/apache2/error.log"
 - **No attribution:** Strip org name, org type, and all internal identifiers from shared indicators.
 - **No internal context:** Strip out log lines, user IDs, hostnames, or any data that could identify the source.
 - **No attack details:** Only share the indicator itself, confidence, and timestamp by default.
-- **Configurable privacy level:**  
+- **Configurable privacy level:**
   - **Strict:** Only indicator value and type.
   - **Moderate (default):** Indicator, confidence, timestamp.
   - **Open:** Indicator, confidence, timestamp, tags/context (still no org info).
@@ -144,14 +146,14 @@ apache_error_log = "/var/log/apache2/error.log"
 
 ## 7. Authentication & Security
 
-- **Public key authentication:**  
+- **Public key authentication:**
   - Each node possesses a unique key pair.
   - Public key is registered with the registry and shared with peers.
   - All communications are signed and/or encrypted using these keys.
-- **TLS/mTLS:**  
+- **TLS/mTLS:**
   - Use TLS for all node-to-node and node-to-registry communication.
   - Support mutual TLS for peer authentication.
-- **Manual peer approval:**  
+- **Manual peer approval:**
   - No automatic trust; all peers must be manually approved.
 
 ---
@@ -160,8 +162,8 @@ apache_error_log = "/var/log/apache2/error.log"
 
 - **Registry:** Public, opt-in only.
 - **Indicators:** Private by default; access scope can be changed to public or group.
-- **Fields:**  
-  - `access_scope`: "private", "public", "group:\<name>"
+- **Fields:**
+  - `tlp`: "white", "green", "amber", "red"
   - `created`, `modified`: Timestamps for audit and access control.
 
 ---
@@ -170,16 +172,17 @@ apache_error_log = "/var/log/apache2/error.log"
 
 ### 9.1 Mapping Example
 
-| Internal Field   | STIX/TAXII Field                |
-|------------------|---------------------------------|
-| type             | type (e.g., "indicator")        |
-| value            | pattern (e.g., `[ipv4-addr:value = '1.2.3.4']`) |
-| confidence       | confidence                      |
-| created          | created                         |
-| modified         | modified                        |
-| tags             | labels                          |
-| access_scope     | granular_markings (custom)      |
-| custom_fields    | extensions                      |
+| Internal Field | STIX/TAXII Field                                |
+| -------------- | ----------------------------------------------- |
+| type           | type (e.g., "indicator")                        |
+| value          | pattern (e.g., `[ipv4-addr:value = '1.2.3.4']`) |
+| confidence     | confidence                                      |
+| created        | created                                         |
+| modified       | modified                                        |
+| tags           | labels                                          |
+| tlp            | granular_markings (custom)                      |
+| recipients     | recipients                                      |
+| custom_fields  | extensions                                      |
 
 ### 9.2 Example Conversion (Python-like pseudocode)
 
@@ -188,7 +191,7 @@ def to_stix(self):
 	# Not implemented: omit keys based on node-defined privacy level
     stix_obj = {
         "type": "indicator",
-        "id": f"indicator--{self.id}", # UUIDv7 primary key
+        "id": f"indicator--{self.id}",  # UUIDv7 primary key
         "created": self.created,
         "modified": self.modified,
         "labels": self.tags,
@@ -196,7 +199,7 @@ def to_stix(self):
         "pattern": self.build_pattern(),
         "extensions": self.custom_fields,
         "granular_markings": [
-            {"marking_ref": self.access_scope}
+            {"marking_ref": self.tlp}   # instantiate tlp marking
         ]
     }
     return stix_obj
@@ -212,33 +215,33 @@ def to_stix(self):
 
 - **POST** `/api/v1/nodes/register`
 - **Request:**
-    ```json
-    {
-      "public_key": "base64-encoded-key",
-      "endpoint": "https://node.example.com:3030"
-    }
-    ```
+  ```json
+  {
+    "public_key": "base64-encoded-key",
+    "endpoint": "https://node.example.com:3030"
+  }
+  ```
 - **Response:**
-    ```json
-    {
-      "status": "ok",
-      "peers": [
-        {"endpoint": "https://peer1.example.com:3030", "public_key": "..."},
-        {"endpoint": "https://peer2.example.com:3030", "public_key": "..."}
-      ]
-    }
-    ```
+  ```json
+  {
+    "status": "ok",
+    "peers": [
+      { "endpoint": "https://peer1.example.com:3030", "public_key": "..." },
+      { "endpoint": "https://peer2.example.com:3030", "public_key": "..." }
+    ]
+  }
+  ```
 
 #### **Get Peer List**
 
 - **GET** `/api/v1/peers`
 - **Response:**
-    ```json
-    [
-      {"endpoint": "https://peer1.example.com:3030", "public_key": "..."},
-      {"endpoint": "https://peer2.example.com:3030", "public_key": "..."}
-    ]
-    ```
+  ```json
+  [
+    { "endpoint": "https://peer1.example.com:3030", "public_key": "..." },
+    { "endpoint": "https://peer2.example.com:3030", "public_key": "..." }
+  ]
+  ```
 
 ---
 
@@ -248,29 +251,29 @@ def to_stix(self):
 
 - **POST** `/api/v1/indicators/gossip`
 - **Request:**
-    ```json
-    {
-      "indicators": [ ... ],  // List of sanitized indicators
-      "signature": "base64-encoded-signature"
-    }
-    ```
+  ```json
+  {
+    "indicators": [ ... ],  // List of sanitized indicators
+    "signature": "base64-encoded-signature"
+  }
+  ```
 - **Response:**
-    ```json
-    {
-      "status": "ok",
-      "received": 12
-    }
-    ```
+  ```json
+  {
+    "status": "ok",
+    "received": 12
+  }
+  ```
 
 #### **Fetch Public Indicators**
 
 - **GET** `/api/v1/indicators/public`
 - **Response:**
-    ```json
-    [
-      { ... }, // List of public indicators
-    ]
-    ```
+  ```json
+  [
+    { ... }, // List of public indicators
+  ]
+  ```
 
 #### **Peer Approval (Manual/Out-of-Band)**
 
@@ -284,7 +287,7 @@ def to_stix(self):
 - SaaS main registrar
 - **Support for new indicator types and custom fields**
 - **Integration with SIEM/SOAR tools**
-- **Web dashboard for visualization & analytics
+- \*\*Web dashboard for visualization & analytics
 - **Federated registries**
 - **Advanced privacy (differential privacy, zero-knowledge proofs)**
 - **Reputation system for peer reliability**
