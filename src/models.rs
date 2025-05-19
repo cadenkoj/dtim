@@ -4,7 +4,7 @@ use std::{
     net::IpAddr,
 };
 
-use crate::{crypto::CryptoContext, uuid::Uuid};
+use crate::{crypto::SymmetricKeyManager, uuid::Uuid};
 use chrono::{DateTime, Utc};
 use regex::Regex;
 use serde::{Deserialize, Serialize};
@@ -68,10 +68,10 @@ impl ThreatIndicator {
 
     pub fn encrypt(
         &self,
-        crypto_context: &mut CryptoContext,
+        key_mgr: &mut SymmetricKeyManager,
     ) -> Result<EncryptedThreatIndicator, io::Error> {
         let serialized = serde_json::to_vec(self).expect("Failed to serialize ThreatIndicator");
-        let (ciphertext, nonce, mac) = crypto_context.encrypt(&serialized).map_err(|e| {
+        let (ciphertext, nonce, mac) = key_mgr.encrypt(&serialized).map_err(|e| {
             io::Error::new(io::ErrorKind::Other, format!("Encryption failed: {}", e))
         })?;
 
@@ -84,9 +84,9 @@ impl ThreatIndicator {
 
     pub fn decrypt(
         encrypted: &EncryptedThreatIndicator,
-        crypto_context: &CryptoContext,
+        key_mgr: &SymmetricKeyManager,
     ) -> Result<Self, String> {
-        let decrypted = crypto_context
+        let decrypted = key_mgr
             .decrypt(&encrypted.ciphertext, &encrypted.nonce, &encrypted.mac)
             .map_err(|e| format!("Decryption failed: {}", e))?;
 
@@ -158,6 +158,12 @@ impl ThreatIndicator {
                 json
             }
         }
+    }
+
+    pub fn from_stix(stix: serde_json::Value) -> Result<Self, String> {
+        let indicator = serde_json::from_value(stix)
+            .map_err(|e| format!("Failed to deserialize ThreatIndicator: {}", e))?;
+        Ok(indicator)
     }
 
     pub fn to_stix(

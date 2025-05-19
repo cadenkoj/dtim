@@ -1,38 +1,106 @@
 use axum::{
-    extract::{Json, Path, State},
+    body::{Body, Bytes},
+    extract::{Json, Path, Request, State},
     http::StatusCode,
+    middleware::{self, Next},
+    response::Response,
     routing::{get, post},
-    Router,
+    Extension, Router,
 };
 use axum_server::tls_rustls::RustlsConfig;
+use base64::{prelude::BASE64_STANDARD, Engine};
+use ed25519_dalek::VerifyingKey;
+use http_body_util::BodyExt as _;
 use rustls::ServerConfig;
 use serde::Serialize;
 use std::sync::Arc;
 use std::{io, str::FromStr};
 use tokio::sync::Mutex;
 
-use crate::node::Node;
-use crate::{crypto::CryptoContext, models::StixBundle};
+use crate::{
+    crypto::MeshIdentity,
+    error::{ApiError, ApiErrorResponse},
+    node::{Node, NodePeer},
+};
+use crate::{crypto::SymmetricKeyManager, models::StixBundle};
 use crate::{
     models::{EncryptedThreatIndicator, ThreatIndicator},
     uuid::Uuid,
 };
 
-#[derive(Serialize)]
-struct ApiError {
-    error: String,
+#[derive(Clone)]
+pub struct AppState {
+    pub node: Arc<Mutex<Node>>,
+    pub mesh_identity: MeshIdentity,
+    pub key_mgr: SymmetricKeyManager,
 }
 
-type ApiResponse<T> = Result<(StatusCode, Json<T>), (StatusCode, Json<ApiError>)>;
+type ApiResponse<T> = Result<(StatusCode, Json<T>), ApiErrorResponse>;
+
+async fn auth(req: Request, next: Next) -> Result<Response, ApiErrorResponse> {
+    let (parts, body) = req.into_parts();
+    let headers = &parts.headers;
+
+    let pubkey = headers
+        .get("X-Mesh-Public-Key")
+        .and_then(|header| header.to_str().ok());
+    let sig = headers
+        .get("X-Mesh-Signature")
+        .and_then(|header| header.to_str().ok());
+    let bytes = body
+        .collect()
+        .await
+        .map_err(|_| ApiError::INTERNAL_SERVER_ERROR)?
+        .to_bytes();
+
+    let auth_data = if let (Some(pubkey), Some(sig)) = (pubkey, sig) {
+        (pubkey.to_string(), sig.to_string(), &bytes)
+    } else {
+        return Err(ApiError::UNAUTHORIZED.into());
+    };
+
+    if let Some(node_id) = authorize_client_node(auth_data).await {
+        let mut req = Request::from_parts(parts, Body::from(bytes));
+        req.extensions_mut().insert(node_id);
+        Ok(next.run(req).await)
+    } else {
+        Err(ApiError::UNAUTHORIZED.into())
+    }
+}
+
+async fn authorize_client_node(
+    (pubkey, sig, body): (String, String, &Bytes),
+) -> Option<MeshIdentity> {
+    let pub_bytes: [u8; 32] = BASE64_STANDARD
+        .decode(pubkey)
+        .ok()
+        .and_then(|bytes| bytes.as_slice().try_into().ok())?;
+
+    let verifying_key = VerifyingKey::from_bytes(&pub_bytes).ok()?;
+    let valid = MeshIdentity::verify(verifying_key, body, &sig);
+    let node_id = MeshIdentity::derive_hex_id(&pub_bytes);
+    // TODO: Check if the node is registered (persist in db)
+    if valid {
+        Some(MeshIdentity::Remote {
+            id: node_id,
+            verifying_key,
+        })
+    } else {
+        None
+    }
+}
 
 pub async fn start_server(
     node: Arc<Mutex<Node>>,
-    crypto_context: Arc<Mutex<CryptoContext>>,
+    key_mgr: SymmetricKeyManager,
     config: Arc<ServerConfig>,
     port: u16,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    let mesh_identity = node.lock().await.identity().clone();
+
     let app = Router::new()
         // Peer registry endpoints
+        .route("/api/v1/echo", post(echo_handler))
         .route("/api/v1/nodes/register", post(register_node_handler))
         .route("/api/v1/peers", get(get_peers_handler))
         // Indicator endpoints
@@ -60,7 +128,12 @@ pub async fn start_server(
             "/taxii2/root/collections/{id}/objects/",
             post(taxii_post_objects_handler),
         )
-        .with_state((node, crypto_context));
+        .with_state(Arc::new(AppState {
+            node,
+            mesh_identity,
+            key_mgr,
+        }))
+        .layer(middleware::from_fn(auth));
 
     let addr = format!("0.0.0.0:{}", port).parse()?;
     let tls_config = RustlsConfig::from_config(config);
@@ -73,124 +146,155 @@ pub async fn start_server(
                 format!("Failed to start server: {}", e),
             )
         })?;
-
     Ok(())
+}
+
+#[derive(Serialize)]
+struct EchoResponse {
+    status: String,
+    node_id: String,
+}
+
+async fn echo_handler(
+    Extension(mesh_identity): Extension<MeshIdentity>,
+) -> ApiResponse<EchoResponse> {
+    Ok((
+        StatusCode::OK,
+        Json(EchoResponse {
+            status: "ok".to_string(),
+            node_id: mesh_identity.id().clone(),
+        }),
+    ))
 }
 
 // --- Peer Registry Handlers ---
 
-async fn register_node_handler(
-    State((_, _)): State<(Arc<Mutex<Node>>, Arc<Mutex<CryptoContext>>)>,
-    Json(_): Json<serde_json::Value>,
-) -> ApiResponse<serde_json::Value> {
-    // TODO: Implement node registration logic
-    Ok((StatusCode::OK, Json(serde_json::json!({"status": "ok"}))))
+#[derive(Serialize)]
+struct NodePeersResponse {
+    status: String,
+    peers: Vec<NodePeer>,
 }
 
-async fn get_peers_handler(
-    State((node, _)): State<(Arc<Mutex<Node>>, Arc<Mutex<CryptoContext>>)>,
-) -> ApiResponse<Vec<serde_json::Value>> {
-    // TODO: Implement peer list retrieval
-    let node = node.lock().await;
+async fn register_node_handler(
+    Extension(_): Extension<MeshIdentity>,
+    State(state): State<Arc<AppState>>,
+    Json(peer): Json<NodePeer>,
+) -> ApiResponse<NodePeersResponse> {
+    let mut node = state.node.lock().await;
+    node.add_peer(&peer);
     Ok((
         StatusCode::OK,
-        Json(
-            node.get_peers()
-                .iter()
-                .map(|p| serde_json::json!(p))
-                .collect(),
-        ),
+        Json(NodePeersResponse {
+            status: "ok".to_string(),
+            peers: node.get_peers().values().cloned().collect(),
+        }),
+    ))
+}
+
+async fn get_peers_handler(State(state): State<Arc<AppState>>) -> ApiResponse<NodePeersResponse> {
+    let node = state.node.lock().await;
+    Ok((
+        StatusCode::OK,
+        Json(NodePeersResponse {
+            status: "ok".to_string(),
+            peers: node.get_peers().values().cloned().collect(),
+        }),
     ))
 }
 
 // --- Indicator Handlers ---
 
+#[derive(Serialize)]
+struct GossipIndicatorsResponse {
+    status: String,
+    received: usize,
+}
+
 async fn gossip_indicators_handler(
-    State((node, crypto_context)): State<(Arc<Mutex<Node>>, Arc<Mutex<CryptoContext>>)>,
+    State(state): State<Arc<AppState>>,
     Json(indicators): Json<Vec<EncryptedThreatIndicator>>,
-) -> ApiResponse<serde_json::Value> {
-    let crypto = crypto_context.lock().await;
-    let mut node = node.lock().await;
+) -> ApiResponse<GossipIndicatorsResponse> {
+    let mut node = state.node.lock().await;
     let mut count = 0;
     for encrypted in indicators {
-        if let Ok(indicator) = ThreatIndicator::decrypt(&encrypted, &crypto) {
+        if let Ok(indicator) = ThreatIndicator::decrypt(&encrypted, &state.key_mgr) {
             node.add_or_increment_indicator(indicator);
             count += 1;
         }
     }
     Ok((
         StatusCode::OK,
-        Json(serde_json::json!({ "received": count })),
+        Json(GossipIndicatorsResponse {
+            status: "ok".to_string(),
+            received: count,
+        }),
     ))
 }
 
+#[derive(Serialize)]
+struct GetIndicatorsResponse {
+    status: String,
+    indicators: Vec<ThreatIndicator>,
+}
+
 async fn get_public_indicators_handler(
-    State((node, _)): State<(Arc<Mutex<Node>>, Arc<Mutex<CryptoContext>>)>,
-) -> ApiResponse<Vec<serde_json::Value>> {
-    let node = node.lock().await;
+    State(state): State<Arc<AppState>>,
+) -> ApiResponse<GetIndicatorsResponse> {
+    let node = state.node.lock().await;
     let indicators = node.list_indicators_by_tlp(crate::models::TlpLevel::White);
     // Return anonymized (open) view
-    let result: Vec<_> = indicators
-        .iter()
-        .map(|i| i.to_json(node.get_level()))
-        .collect();
-    Ok((StatusCode::OK, Json(result)))
+    Ok((
+        StatusCode::OK,
+        Json(GetIndicatorsResponse {
+            status: "ok".to_string(),
+            indicators: indicators.to_vec(),
+        }),
+    ))
 }
 
 async fn get_private_indicators_handler(
-    State((node, _)): State<(Arc<Mutex<Node>>, Arc<Mutex<CryptoContext>>)>,
-) -> ApiResponse<Vec<serde_json::Value>> {
-    let node = node.lock().await;
+    State(state): State<Arc<AppState>>,
+) -> ApiResponse<GetIndicatorsResponse> {
+    let node = state.node.lock().await;
     let indicators = node.list_indicators_by_tlp(crate::models::TlpLevel::Red);
+    // TODO: Ensure the node is an authenticated recipient for private indicators
     // Return anonymized (moderate) view
-    let result: Vec<_> = indicators
-        .iter()
-        .map(|i| i.to_json(node.get_level()))
-        .collect();
-    Ok((StatusCode::OK, Json(result)))
+    Ok((
+        StatusCode::OK,
+        Json(GetIndicatorsResponse {
+            status: "ok".to_string(),
+            indicators: indicators.to_vec(),
+        }),
+    ))
 }
 
 async fn get_indicator_by_id_handler(
-    State((node, _)): State<(Arc<Mutex<Node>>, Arc<Mutex<CryptoContext>>)>,
+    State(state): State<Arc<AppState>>,
     Path(id): Path<String>,
 ) -> ApiResponse<serde_json::Value> {
-    let node = node.lock().await;
-    if let Some(indicator) = node.get_indicator_by_id(&Uuid::from_str(&id).unwrap()) {
-        Ok((StatusCode::OK, Json(indicator.to_json(node.get_level()))))
-    } else {
-        Err((
-            StatusCode::NOT_FOUND,
-            Json(ApiError {
-                error: "Indicator not found".to_string(),
-            }),
-        ))
-    }
+    let node = state.node.lock().await;
+    let id = Uuid::from_str(&id).map_err(|_| ApiError::INVALID_INDICATOR_ID)?;
+    let indicator = node.get_indicator_by_id(&id).ok_or(ApiError::NOT_FOUND)?;
+    Ok((StatusCode::OK, Json(indicator.to_json(node.get_level()))))
 }
 
 // --- Log Viewer ---
 
 async fn read_logs_handler(
-    State((node, _)): State<(Arc<Mutex<Node>>, Arc<Mutex<CryptoContext>>)>,
+    State(state): State<Arc<AppState>>,
     Path(date): Path<String>,
 ) -> ApiResponse<Vec<String>> {
-    let node = node.lock().await;
-    match node.read_logs(&date) {
-        Ok(logs) => Ok((StatusCode::OK, Json(logs))),
-        Err(e) => Err((
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Json(ApiError {
-                error: format!("Failed to read logs: {}", e),
-            }),
-        )),
-    }
+    let node = state.node.lock().await;
+    let logs = node
+        .read_logs(&date)
+        .map_err(|_| ApiError::LOG_PARSE_ERROR)?;
+    Ok((StatusCode::OK, Json(logs)))
 }
 
 // --- TAXII Handlers ---
 
-async fn taxii_discovery_handler(
-    State((node, _)): State<(Arc<Mutex<Node>>, Arc<Mutex<CryptoContext>>)>,
-) -> Json<serde_json::Value> {
-    let node = node.lock().await;
+async fn taxii_discovery_handler(State(state): State<Arc<AppState>>) -> Json<serde_json::Value> {
+    let node = state.node.lock().await;
     Json(serde_json::json!({
         "title": format!("DTIM TAXII Server (node--{})", node.get_id()),
         "description": "TAXII 2.1 server for sharing threat intelligence",
@@ -223,20 +327,22 @@ async fn taxii_collections_handler() -> Json<serde_json::Value> {
 }
 
 async fn taxii_get_objects_handler(
-    State((node, _)): State<(Arc<Mutex<Node>>, Arc<Mutex<CryptoContext>>)>,
+    State(state): State<Arc<AppState>>,
     Path(_collection_id): Path<String>,
-) -> Json<serde_json::Value> {
-    let node = node.lock().await;
+) -> ApiResponse<serde_json::Value> {
+    let node = state.node.lock().await;
     let stix_objects = node.list_objects_by_tlp(crate::models::TlpLevel::White);
     let bundle = StixBundle::new(stix_objects);
-    Json(bundle.to_stix())
+    Ok((StatusCode::OK, Json(bundle.to_stix())))
 }
 
 async fn taxii_post_objects_handler(
-    State((_, _)): State<(Arc<Mutex<Node>>, Arc<Mutex<CryptoContext>>)>,
+    State(state): State<Arc<AppState>>,
     Path(_collection_id): Path<String>,
-    Json(_): Json<serde_json::Value>,
-) -> Json<serde_json::Value> {
-    // TODO: Parse STIX objects into ThreatIndicators
-    Json(serde_json::json!({ "status": "not implemented" }))
+    Json(stix): Json<serde_json::Value>,
+) -> ApiResponse<serde_json::Value> {
+    let indicator = ThreatIndicator::from_stix(stix).map_err(|_| ApiError::INVALID_STIX_OBJECT)?;
+    let mut node = state.node.lock().await;
+    node.add_indicator(indicator);
+    Ok((StatusCode::OK, Json(serde_json::json!({ "status": "ok" }))))
 }

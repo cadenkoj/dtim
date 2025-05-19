@@ -1,21 +1,22 @@
-use crate::crypto::CryptoContext;
 use chrono::Utc;
 use log::{error, Level, LevelFilter, Metadata, Record};
 use std::fs::{self, OpenOptions};
 use std::io::{self, Write};
 use std::path::PathBuf;
 
-#[derive(Clone)]
+use crate::crypto::SymmetricKeyManager;
+
+#[derive(Clone, Debug)]
 pub struct EncryptedLogger {
     log_path: PathBuf,
-    crypto_context: CryptoContext,
+    key_mgr: SymmetricKeyManager,
     level: LevelFilter,
 }
 
 impl EncryptedLogger {
     pub fn new(
         log_path: PathBuf,
-        crypto_context: CryptoContext,
+        key_mgr: SymmetricKeyManager,
         level: LevelFilter,
     ) -> io::Result<Self> {
         if let Some(parent) = log_path.parent() {
@@ -23,7 +24,7 @@ impl EncryptedLogger {
         }
         Ok(EncryptedLogger {
             log_path,
-            crypto_context,
+            key_mgr,
             level,
         })
     }
@@ -32,12 +33,9 @@ impl EncryptedLogger {
         let timestamp = Utc::now().to_rfc3339();
         let log_entry = format!("[{}] [{}] {}\n", timestamp, level, message);
 
-        let (ciphertext, nonce, mac) =
-            self.crypto_context
-                .encrypt(log_entry.as_bytes())
-                .map_err(|e| {
-                    io::Error::new(io::ErrorKind::Other, format!("Encryption failed: {}", e))
-                })?;
+        let (ciphertext, nonce, mac) = self.key_mgr.encrypt(log_entry.as_bytes()).map_err(|e| {
+            io::Error::new(io::ErrorKind::Other, format!("Encryption failed: {}", e))
+        })?;
         let encrypted_entry = format!("{}\n{}\n{}\n", ciphertext, nonce, mac);
 
         let filename = format!("{}.log", Utc::now().format("%Y-%m-%d"));
@@ -77,7 +75,7 @@ impl EncryptedLogger {
                 .next()
                 .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidData, "Invalid log format"))?;
 
-            match self.crypto_context.decrypt(ciphertext, nonce, mac) {
+            match self.key_mgr.decrypt(ciphertext, nonce, mac) {
                 Ok(decrypted) => {
                     if let Ok(log_entry) = String::from_utf8(decrypted) {
                         decrypted_logs.push(log_entry);

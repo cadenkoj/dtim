@@ -1,32 +1,30 @@
 use crate::{
     config::PrivacyConfig,
+    crypto::MeshIdentity,
     logging::EncryptedLogger,
     models::{PrivacyLevel, ThreatIndicator, TlpLevel},
     uuid::Uuid,
 };
 use chrono::Utc;
-use ed25519_dalek::{SigningKey, VerifyingKey};
-use sha2::{Digest, Sha256};
+use serde::{Deserialize, Serialize};
 use std::{collections::HashMap, io};
 
+#[derive(Clone, Debug)]
 pub struct Node {
+    identity: MeshIdentity,
     indicators: HashMap<Uuid, ThreatIndicator>,
-    peers: Vec<String>,
+    peers: HashMap<String, NodePeer>,
     logger: EncryptedLogger,
     privacy_level: PrivacyLevel,
     allow_custom_fields: bool,
-    keypair: (SigningKey, VerifyingKey),
 }
 
 impl Node {
-    pub fn new(
-        logger: EncryptedLogger,
-        privacy: PrivacyConfig,
-        keypair: (SigningKey, VerifyingKey),
-    ) -> Self {
+    pub fn new(identity: MeshIdentity, logger: EncryptedLogger, privacy: PrivacyConfig) -> Self {
         Node {
+            identity,
             indicators: HashMap::new(),
-            peers: Vec::new(),
+            peers: HashMap::new(),
             logger,
             privacy_level: match privacy.level.as_str() {
                 "strict" => PrivacyLevel::Strict,
@@ -34,23 +32,33 @@ impl Node {
                 _ => PrivacyLevel::Moderate,
             },
             allow_custom_fields: privacy.allow_custom_fields,
-            keypair,
         }
+    }
+
+    pub fn identity(&self) -> &MeshIdentity {
+        &self.identity
     }
 
     pub fn get_id(&self) -> String {
-        let pubkey_bytes = self.keypair.1.to_bytes();
-        let hash = Sha256::digest(&pubkey_bytes);
-        hex::encode(&hash)
+        MeshIdentity::derive_hex_id(&self.identity.verifying_key().to_bytes())
     }
 
-    pub fn bootstrap_peers(&mut self, peers: Vec<String>) {
+    pub fn bootstrap_peers(&mut self, peers: Vec<NodePeer>) {
         for peer in peers {
-            self.peers.push(peer.clone());
-            let _ = self
-                .logger
-                .write_log(log::Level::Info, &format!("Bootstrapping peer: {}", peer));
+            self.peers.insert(peer.get_id().to_string(), peer.clone());
+            let _ = self.logger.write_log(
+                log::Level::Info,
+                &format!("Bootstrapping peer: {}", peer.get_endpoint()),
+            );
         }
+    }
+
+    pub fn add_peer(&mut self, peer: &NodePeer) {
+        self.peers.insert(peer.get_id().to_string(), peer.clone());
+        let _ = self.logger.write_log(
+            log::Level::Info,
+            &format!("Adding peer: {}", peer.get_endpoint()),
+        );
     }
 
     pub fn add_indicator(&mut self, indicator: ThreatIndicator) -> Uuid {
@@ -95,12 +103,7 @@ impl Node {
     }
 
     pub fn list_objects_by_tlp(&self, tlp: TlpLevel) -> Vec<serde_json::Value> {
-        let indicators: Vec<_> = self
-            .indicators
-            .values()
-            .filter(|i| i.tlp == tlp)
-            .cloned()
-            .collect();
+        let indicators: Vec<_> = self.list_indicators_by_tlp(tlp);
 
         let mut stix_indicators: Vec<serde_json::Value> = indicators
             .iter()
@@ -108,9 +111,8 @@ impl Node {
             .filter_map(|i| i)
             .collect();
 
-        let stix_mds: Vec<serde_json::Value> = self
-            .indicators
-            .values()
+        let stix_mds: Vec<serde_json::Value> = indicators
+            .iter()
             .flat_map(|i| i.marking_definitions.iter().map(|md| md.to_stix()))
             .collect();
 
@@ -119,11 +121,31 @@ impl Node {
         stix_indicators
     }
 
-    pub fn get_peers(&self) -> &[String] {
+    pub fn get_peers(&self) -> &HashMap<String, NodePeer> {
         &self.peers
     }
 
     pub fn read_logs(&self, date: &str) -> io::Result<Vec<String>> {
         self.logger.read_logs(date)
+    }
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct NodePeer {
+    id: String,
+    endpoint: String,
+}
+
+impl NodePeer {
+    pub fn new(id: String, endpoint: String) -> Self {
+        NodePeer { id, endpoint }
+    }
+
+    pub fn get_id(&self) -> &str {
+        &self.id
+    }
+
+    pub fn get_endpoint(&self) -> &str {
+        &self.endpoint
     }
 }

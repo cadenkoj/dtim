@@ -1,15 +1,27 @@
 mod api;
 mod config;
 mod crypto;
+mod error;
 mod logging;
 mod models;
 mod node;
 mod uuid;
 
+use axum::body::Body;
+use base64::prelude::BASE64_STANDARD;
+use base64::Engine;
+use config::Config;
+use http_body_util::BodyExt as _;
 use log::LevelFilter;
 use models::{IndicatorType, ThreatIndicator};
+use node::NodePeer;
+use rustls::crypto::aws_lc_rs as provider;
 use rustls::pki_types::pem::PemObject;
 use rustls::pki_types::{CertificateDer, PrivateKeyDer};
+use rustls::server::WebPkiClientVerifier;
+use rustls::RootCertStore;
+use serde_json::json;
+use std::path::Path;
 use std::sync::Arc;
 use tokio::sync::Mutex;
 
@@ -20,38 +32,83 @@ fn init_logging() {
         .init();
 }
 
+fn load_certs(filename: &Path) -> Vec<CertificateDer<'static>> {
+    CertificateDer::pem_file_iter(filename)
+        .expect("cannot open certificate file")
+        .map(|result| result.unwrap())
+        .collect()
+}
+
+fn load_private_key(filename: &Path) -> PrivateKeyDer<'static> {
+    PrivateKeyDer::from_pem_file(filename).expect("cannot read private key file")
+}
+
+fn make_server_config(config: &Config) -> Arc<rustls::ServerConfig> {
+    let client_auth = if let Some(auth) = &config.security.ca_path {
+        let roots = load_certs(auth);
+        let mut client_auth_roots = RootCertStore::empty();
+        for root in roots {
+            client_auth_roots.add(root).unwrap();
+        }
+        WebPkiClientVerifier::builder(client_auth_roots.into())
+            .build()
+            .unwrap()
+    } else {
+        WebPkiClientVerifier::no_client_auth()
+    };
+
+    let certs = load_certs(&config.security.tls_cert_path);
+    let privkey = load_private_key(&config.security.tls_key_path);
+
+    let config = rustls::ServerConfig::builder_with_provider(provider::default_provider().into())
+        .with_safe_default_protocol_versions()
+        .expect("inconsistent cipher-suites/versions specified")
+        .with_client_cert_verifier(client_auth)
+        .with_single_cert(certs, privkey)
+        .expect("bad certificates/private key");
+
+    Arc::new(config)
+}
+
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     init_logging();
     let config = config::Config::load()?;
+    let mesh_identity = crypto::MeshIdentity::load_or_generate()?;
+    let mut key_mgr = crypto::SymmetricKeyManager::new(config.security.key_rotation_days);
 
-    let certs = CertificateDer::pem_file_iter(config.security.tls_cert_path.clone())
-        .expect("Failed to open certificate file")
-        .map(|cert| cert.expect("Failed to parse certificate"))
-        .collect();
-    let private_key = PrivateKeyDer::from_pem_file(config.security.tls_key_path.clone())
-        .expect("Failed to parse private key");
-
-    let tls_config = rustls::ServerConfig::builder()
-        .with_no_client_auth()
-        .with_single_cert(certs, private_key)?;
-
-    let mut crypto_context: crypto::CryptoContext =
-        crypto::CryptoContext::new(config.security.key_rotation_days);
-
-    if !crypto_context.keypair_exists() {
-        crypto_context.generate_and_save_keypair()?;
-    }
-
-    let keypair = crypto_context.load_keypair()?;
+    let tls_config = make_server_config(&config);
 
     let logger = logging::EncryptedLogger::new(
         config.storage.encrypted_logs_path.clone(),
-        crypto_context.clone(),
+        key_mgr.clone(),
         LevelFilter::Debug,
     )?;
 
-    let node = node::Node::new(logger, config.privacy, keypair);
+    let node = node::Node::new(mesh_identity.clone(), logger, config.privacy);
+
+    let id = node.get_id();
+    println!("Node ID: {:?}", id);
+
+    let data = NodePeer::new(id.to_string(), "127.0.0.1:3030".to_string());
+    let body = Body::from(serde_json::to_string(&data).unwrap());
+
+    let bytes = body
+        .collect()
+        .await
+        .expect("Failed to collect body")
+        .to_bytes();
+
+    let signature = crypto::MeshIdentity::sign(mesh_identity.signing_key().unwrap().clone(), &bytes);
+    let base64_pubkey = BASE64_STANDARD.encode(mesh_identity.verifying_key().to_bytes());
+    println!(
+        "{}",
+        json!({
+            "data": data,
+            "X-Mesh-Public-Key": base64_pubkey,
+            "X-Mesh-Signature": signature,
+        })
+    );
 
     let indicator = ThreatIndicator::new(
         IndicatorType::Ipv4Address,
@@ -62,14 +119,13 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         None,
     );
 
-    let encrypted = indicator.encrypt(&mut crypto_context);
+    let encrypted = indicator.encrypt(&mut key_mgr);
     println!("Encrypted: {:?}", encrypted);
 
-    let decrypted = ThreatIndicator::decrypt(&encrypted.unwrap(), &crypto_context);
+    let decrypted = ThreatIndicator::decrypt(&encrypted.unwrap(), &key_mgr);
     println!("Decrypted: {:?}", decrypted);
 
     let node = Arc::new(Mutex::new(node));
-    let crypto_context = Arc::new(Mutex::new(crypto_context));
 
     {
         let mut node = node.lock().await;
@@ -77,9 +133,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         node.bootstrap_peers(config.network.default_peers.clone());
     }
 
-    let server_handle = tokio::spawn(async move {
-        api::start_server(node, crypto_context, Arc::new(tls_config), 3030).await
-    });
+    let server_handle =
+        tokio::spawn(async move { api::start_server(node, key_mgr, tls_config, 3030).await });
 
     server_handle.await??;
 

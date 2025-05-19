@@ -1,9 +1,12 @@
 use serde::Deserialize;
 use std::path::PathBuf;
 
+use crate::node::NodePeer;
+
 #[derive(Debug, Deserialize)]
 pub struct SecurityConfig {
     pub key_rotation_days: u64,
+    pub ca_path: Option<PathBuf>,
     pub tls_cert_path: PathBuf,
     pub tls_key_path: PathBuf,
 }
@@ -17,7 +20,7 @@ pub struct StorageConfig {
 pub struct NetworkConfig {
     pub gossip_interval_seconds: u64,
     pub peers_per_round: u32,
-    pub default_peers: Vec<String>,
+    pub default_peers: Vec<NodePeer>,
     pub registry_url: String,
 }
 

@@ -1,7 +1,8 @@
 [security]
 key_rotation_days = 7
-tls_cert_path = "certs/server.crt"
-tls_key_path = "certs/server.key"
+ca_path = "certs/ca.crt"
+tls_cert_path = "certs/node.crt"
+tls_key_path = "certs/node.key"
 
 [storage]
 encrypted_logs_path = "data/logs"
@@ -9,14 +10,20 @@ encrypted_logs_path = "data/logs"
 [network]
 gossip_interval_seconds = 60
 peers_per_round = 3
-default_peers = [
-    "https://peer1.example.com:3030",
-    "https://peer2.example.com:3030"
-]
 registry_url = "https://registry.dtim.example.com"
 
+[[network.default_peers]]
+id = "2"
+endpoint = "https://peer1.example.com:3030"
+public_key = "Mg=="
+
+[[network.default_peers]]
+id = "3"
+endpoint = "https://peer2.example.com:3030"
+public_key = "Mw=="
+
 [privacy]
-level = "moderate" # Options: "strict", "moderate", "open"
+level = "moderate"         # Options: "strict", "moderate", "open"
 allow_custom_fields = true
 
 [watchers]
