@@ -82,7 +82,13 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     let logger = logging::EncryptedLogger::new(
         settings.storage.encrypted_logs_path.clone(),
         key_mgr.clone(),
-        LevelFilter::from_str(&settings.log_level).unwrap(),
+        LevelFilter::from_str(&settings.log_level).unwrap_or_else(|_| {
+            log::warn!(
+                "Invalid log level: {}, defaulting to Info",
+                settings.log_level
+            );
+            LevelFilter::Info
+        }),
     )?;
 
     let node = node::Node::new(mesh_identity.clone(), logger, settings.privacy);

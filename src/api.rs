@@ -31,6 +31,7 @@ use crate::{
 #[derive(Clone)]
 pub struct AppState {
     pub node: Arc<Mutex<Node>>,
+    #[allow(unused)] // TODO: idk what im doing with this yet
     pub mesh_identity: MeshIdentity,
     pub key_mgr: SymmetricKeyManager,
 }
@@ -83,7 +84,7 @@ async fn authorize_client_node(
     if valid {
         Some(MeshIdentity::Remote {
             id: node_id,
-            verifying_key,
+            verifying_key: Box::new(verifying_key),
         })
     } else {
         None

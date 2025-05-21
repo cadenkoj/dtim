@@ -30,7 +30,7 @@ impl SymmetricKeyManager {
     fn generate_key() -> Key<Aes256Gcm> {
         let mut key_bytes = [0u8; 32];
         OsRng.fill_bytes(&mut key_bytes);
-        Key::<Aes256Gcm>::from_slice(&key_bytes).clone()
+        Key::<Aes256Gcm>::from_slice(&key_bytes).to_owned()
     }
 
     pub fn rotate_key(&mut self) {
@@ -39,7 +39,7 @@ impl SymmetricKeyManager {
             .unwrap()
             .as_secs();
         if now - self.key_rotation_time >= self.rotation_interval {
-            self.previous_key = Some(self.current_key.clone());
+            self.previous_key = Some(self.current_key);
             self.current_key = Self::generate_key();
             self.key_rotation_time = now;
         }

@@ -94,6 +94,7 @@ impl ThreatIndicator {
             .map_err(|e| format!("Failed to deserialize ThreatIndicator: {}", e))
     }
 
+    #[allow(unused)] // TODO: implement in watchers
     pub fn infer_type(value: &str) -> IndicatorType {
         if let Ok(ip) = value.parse::<IpAddr>() {
             return match ip {

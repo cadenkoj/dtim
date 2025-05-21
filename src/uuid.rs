@@ -1,10 +1,14 @@
 use chrono::{DateTime, Utc};
+use once_cell::sync::Lazy;
 use serde::{Deserialize, Serialize};
 use std::fmt::{self, Display, Formatter};
 use std::ops::Deref;
 use std::str;
 use std::str::FromStr;
+use std::sync::Mutex;
 use uuid::ContextV7;
+
+static TIMESTAMP_CONTEXT: Lazy<Mutex<ContextV7>> = Lazy::new(|| Mutex::new(ContextV7::new()));
 
 #[derive(
     Clone, Copy, Debug, Default, Eq, Ord, PartialEq, PartialOrd, Serialize, Deserialize, Hash,
@@ -55,8 +59,6 @@ impl Deref for Uuid {
 }
 
 impl Uuid {
-    const TIMESTAMP_CONTEXT: ContextV7 = ContextV7::new();
-
     /// Generate a new UUID
     pub fn new() -> Self {
         Self(uuid::Uuid::now_v7())
@@ -67,21 +69,22 @@ impl Uuid {
     }
     /// Generate a new V7 UUID
     pub fn new_v7_from_datetime(timestamp: DateTime<Utc>) -> Self {
+        let ctx = TIMESTAMP_CONTEXT.lock().unwrap();
         let ts = uuid::Timestamp::from_unix(
-            Self::TIMESTAMP_CONTEXT,
+            &*ctx,
             timestamp.timestamp() as u64,
             timestamp.timestamp_subsec_nanos(),
         );
         Self(uuid::Uuid::new_v7(ts))
     }
     /// Convert the Uuid to a raw String
-    pub fn to_raw(&self) -> String {
+    pub fn to_raw(self) -> String {
         self.0.to_string()
     }
 }
 
 impl Display for Uuid {
     fn fmt(&self, f: &mut Formatter) -> fmt::Result {
-        write!(f, "{}", self.0.to_string())
+        write!(f, "{}", self.0)
     }
 }
