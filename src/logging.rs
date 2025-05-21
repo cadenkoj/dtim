@@ -1,7 +1,7 @@
 use chrono::Utc;
 use log::{error, Level, LevelFilter, Metadata, Record};
 use std::fs::{self, OpenOptions};
-use std::io::{self, Write};
+use std::io::Write as _;
 use std::path::PathBuf;
 
 use crate::crypto::SymmetricKeyManager;
@@ -18,7 +18,7 @@ impl EncryptedLogger {
         log_path: PathBuf,
         key_mgr: SymmetricKeyManager,
         level: LevelFilter,
-    ) -> io::Result<Self> {
+    ) -> std::io::Result<Self> {
         if let Some(parent) = log_path.parent() {
             fs::create_dir_all(parent)?;
         }
@@ -29,13 +29,14 @@ impl EncryptedLogger {
         })
     }
 
-    pub fn write_log(&mut self, level: Level, message: &str) -> io::Result<()> {
+    pub fn write_log(&mut self, level: Level, message: &str) -> std::io::Result<()> {
         let timestamp = Utc::now().to_rfc3339();
         let log_entry = format!("[{}] [{}] {}\n", timestamp, level, message);
 
-        let (ciphertext, nonce, mac) = self.key_mgr.encrypt(log_entry.as_bytes()).map_err(|e| {
-            io::Error::new(io::ErrorKind::Other, format!("Encryption failed: {}", e))
-        })?;
+        let (ciphertext, nonce, mac) = self
+            .key_mgr
+            .encrypt(log_entry.as_bytes())
+            .map_err(|e| std::io::Error::other(format!("Encryption failed: {}", e)))?;
         let encrypted_entry = format!("{}\n{}\n{}\n", ciphertext, nonce, mac);
 
         let filename = format!("{}.log", Utc::now().format("%Y-%m-%d"));
@@ -52,7 +53,7 @@ impl EncryptedLogger {
         Ok(())
     }
 
-    pub fn read_logs(&self, date: &str) -> io::Result<Vec<String>> {
+    pub fn read_logs(&self, date: &str) -> std::io::Result<Vec<String>> {
         let filename = format!("{}.log", date);
         let log_file = self.log_path.join(filename);
 
@@ -65,15 +66,15 @@ impl EncryptedLogger {
 
         let mut lines = content.lines().peekable();
         while lines.peek().is_some() {
-            let ciphertext = lines
-                .next()
-                .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidData, "Invalid log format"))?;
-            let nonce = lines
-                .next()
-                .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidData, "Invalid log format"))?;
-            let mac = lines
-                .next()
-                .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidData, "Invalid log format"))?;
+            let ciphertext = lines.next().ok_or_else(|| {
+                std::io::Error::new(std::io::ErrorKind::InvalidData, "Invalid log format")
+            })?;
+            let nonce = lines.next().ok_or_else(|| {
+                std::io::Error::new(std::io::ErrorKind::InvalidData, "Invalid log format")
+            })?;
+            let mac = lines.next().ok_or_else(|| {
+                std::io::Error::new(std::io::ErrorKind::InvalidData, "Invalid log format")
+            })?;
 
             match self.key_mgr.decrypt(ciphertext, nonce, mac) {
                 Ok(decrypted) => {

@@ -72,10 +72,12 @@ struct Root {
 }
 
 impl Settings {
-    pub(crate) fn new() -> Result<Settings, config::ConfigError> {
+    pub(crate) fn new() -> Result<Settings, Box<dyn std::error::Error + Send + Sync>> {
+        dotenvy::dotenv_override()?;
+
         let config = config::Config::builder()
             .add_source(config::File::with_name("config/mesh"))
-            .add_source(config::Environment::with_prefix("DTIM"))
+            .add_source(config::Environment::with_prefix("DTIM").separator("__"))
             .build()?;
 
         let root = config.try_deserialize::<Root>()?;

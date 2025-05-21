@@ -1,8 +1,8 @@
 use crate::{
-    settings::PrivacyConfig,
-    crypto::MeshIdentity,
+    crypto::{self, MeshIdentity},
     logging::EncryptedLogger,
     models::{PrivacyLevel, ThreatIndicator, TlpLevel},
+    settings::PrivacyConfig,
     uuid::Uuid,
 };
 use chrono::Utc;
@@ -20,8 +20,9 @@ pub struct Node {
 }
 
 impl Node {
-    pub fn new(identity: MeshIdentity, logger: EncryptedLogger, privacy: PrivacyConfig) -> Self {
-        Node {
+    pub fn new(logger: EncryptedLogger, privacy: PrivacyConfig) -> Result<Self, std::io::Error> {
+        let identity = crypto::MeshIdentity::load_or_generate()?;
+        Ok(Node {
             identity,
             indicators: HashMap::new(),
             peers: HashMap::new(),
@@ -32,7 +33,7 @@ impl Node {
                 _ => PrivacyLevel::Moderate,
             },
             allow_custom_fields: privacy.allow_custom_fields,
-        }
+        })
     }
 
     pub fn identity(&self) -> &MeshIdentity {
@@ -107,8 +108,7 @@ impl Node {
 
         let mut stix_indicators: Vec<serde_json::Value> = indicators
             .iter()
-            .map(|i| i.to_stix(self.privacy_level, self.allow_custom_fields))
-            .filter_map(|i| i)
+            .filter_map(|i| i.to_stix(self.privacy_level, self.allow_custom_fields))
             .collect();
 
         let stix_mds: Vec<serde_json::Value> = indicators
@@ -145,14 +145,6 @@ impl NodePeer {
 
     pub fn get_endpoint(&self) -> &str {
         &self.endpoint
-    }
-
-    pub fn get_public_key(&self) -> &str {
-        &self.public_key
-    }
-
-    pub fn get_signature(&self) -> Option<&str> {
-        self.signature.as_deref()
     }
 
     pub fn set_signature(&mut self, signature: String) {

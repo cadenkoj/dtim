@@ -13,12 +13,12 @@ pub const PUBLIC_KEY_PATH: &str = "data/keys/mesh.pub";
 pub enum MeshIdentity {
     Local {
         id: String,
-        verifying_key: VerifyingKey,
-        signing_key: SigningKey,
+        verifying_key: Box<VerifyingKey>,
+        signing_key: Box<SigningKey>,
     },
     Remote {
         id: String,
-        verifying_key: VerifyingKey,
+        verifying_key: Box<VerifyingKey>,
     },
 }
 
@@ -36,8 +36,8 @@ impl MeshIdentity {
             .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
         Ok(Self::Local {
             id: MeshIdentity::derive_hex_id(&pub_bytes),
-            signing_key,
-            verifying_key,
+            signing_key: Box::new(signing_key),
+            verifying_key: Box::new(verifying_key),
         })
     }
 
@@ -73,7 +73,7 @@ impl MeshIdentity {
 
     pub fn derive_hex_id(pubkey_bytes: &[u8; 32]) -> String {
         let hash = Sha256::digest(pubkey_bytes);
-        hex::encode(&hash)
+        hex::encode(hash)
     }
 
     pub fn id(&self) -> &String {
