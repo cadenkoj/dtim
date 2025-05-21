@@ -30,8 +30,6 @@ use crate::{
 #[derive(Clone)]
 pub struct AppState {
     pub node: Arc<Mutex<Node>>,
-    #[allow(unused)] // TODO: idk what im doing with this yet
-    pub mesh_identity: MeshIdentity,
     pub key_mgr: SymmetricKeyManager,
 }
 
@@ -94,10 +92,9 @@ pub async fn start_server(
     node: Arc<Mutex<Node>>,
     key_mgr: SymmetricKeyManager,
     config: Arc<ServerConfig>,
+    address: String,
     port: u16,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-    let mesh_identity = node.lock().await.identity().clone();
-
     let app = Router::new()
         // Peer registry endpoints
         .route("/api/v1/echo", post(echo_handler))
@@ -128,14 +125,10 @@ pub async fn start_server(
             "/taxii2/root/collections/{id}/objects/",
             post(taxii_post_objects_handler),
         )
-        .with_state(Arc::new(AppState {
-            node,
-            mesh_identity,
-            key_mgr,
-        }))
+        .with_state(Arc::new(AppState { node, key_mgr }))
         .layer(middleware::from_fn(auth));
 
-    let addr = format!("0.0.0.0:{}", port).parse()?;
+    let addr = format!("{}:{}", address, port).parse()?;
     let tls_config = RustlsConfig::from_config(config);
     axum_server::bind_rustls(addr, tls_config)
         .serve(app.into_make_service())

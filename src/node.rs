@@ -1,5 +1,5 @@
 use crate::{
-    crypto::MeshIdentity,
+    crypto::{self, MeshIdentity},
     logging::EncryptedLogger,
     models::{PrivacyLevel, ThreatIndicator, TlpLevel},
     settings::PrivacyConfig,
@@ -20,8 +20,9 @@ pub struct Node {
 }
 
 impl Node {
-    pub fn new(identity: MeshIdentity, logger: EncryptedLogger, privacy: PrivacyConfig) -> Self {
-        Node {
+    pub fn new(logger: EncryptedLogger, privacy: PrivacyConfig) -> Result<Self, std::io::Error> {
+        let identity = crypto::MeshIdentity::load_or_generate()?;
+        Ok(Node {
             identity,
             indicators: HashMap::new(),
             peers: HashMap::new(),
@@ -32,7 +33,7 @@ impl Node {
                 _ => PrivacyLevel::Moderate,
             },
             allow_custom_fields: privacy.allow_custom_fields,
-        }
+        })
     }
 
     pub fn identity(&self) -> &MeshIdentity {

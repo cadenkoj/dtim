@@ -10,6 +10,7 @@ mod uuid;
 use axum::body::Body;
 use base64::prelude::BASE64_STANDARD;
 use base64::Engine;
+use crypto::MeshIdentity;
 use http_body_util::BodyExt as _;
 use log::LevelFilter;
 use models::{IndicatorType, ThreatIndicator};
@@ -75,7 +76,6 @@ fn make_server_config(settings: &settings::Settings) -> Arc<rustls::ServerConfig
 async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     init_logging();
     let settings = Settings::new()?;
-    let mesh_identity = crypto::MeshIdentity::load_or_generate()?;
     let mut key_mgr = crypto::SymmetricKeyManager::new(settings.tls.key_rotation_days);
     let tls_config = make_server_config(&settings);
 
@@ -91,12 +91,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         }),
     )?;
 
-    let node = node::Node::new(mesh_identity.clone(), logger, settings.privacy);
+    let node = node::Node::new(logger, settings.privacy)?;
 
     let id = node.get_id();
     println!("Node ID: {:?}", id);
 
-    let base64_pubkey = BASE64_STANDARD.encode(mesh_identity.verifying_key().to_bytes());
+    let base64_pubkey = BASE64_STANDARD.encode(node.identity().verifying_key().to_bytes());
 
     let mut data = NodePeer {
         id: id.to_string(),
@@ -113,8 +113,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         .expect("Failed to collect body")
         .to_bytes();
 
-    let signature =
-        crypto::MeshIdentity::sign(mesh_identity.signing_key().unwrap().clone(), &bytes);
+    let signing_key = node
+        .identity()
+        .signing_key()
+        .ok_or_else(|| std::io::Error::other("Failed to get signing key".to_string()))?;
+    let signature = MeshIdentity::sign(signing_key.clone(), &bytes);
 
     data.set_signature(signature);
 
@@ -143,8 +146,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         node.bootstrap_peers(settings.network.init_peers.clone());
     }
 
-    let server_handle =
-        tokio::spawn(async move { api::start_server(node, key_mgr, tls_config, 3030).await });
+    let server_handle = tokio::spawn(async move {
+        api::start_server(node, key_mgr, tls_config, settings.address, settings.port).await
+    });
 
     server_handle.await??;
 
