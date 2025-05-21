@@ -1,5 +1,5 @@
 use crate::{
-    config::PrivacyConfig,
+    settings::PrivacyConfig,
     crypto::MeshIdentity,
     logging::EncryptedLogger,
     models::{PrivacyLevel, ThreatIndicator, TlpLevel},
@@ -132,20 +132,36 @@ impl Node {
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct NodePeer {
-    id: String,
-    endpoint: String,
+    pub id: String,
+    pub endpoint: String,
+    pub public_key: String,
+    pub signature: Option<String>,
 }
 
 impl NodePeer {
-    pub fn new(id: String, endpoint: String) -> Self {
-        NodePeer { id, endpoint }
-    }
-
     pub fn get_id(&self) -> &str {
         &self.id
     }
 
     pub fn get_endpoint(&self) -> &str {
         &self.endpoint
+    }
+
+    pub fn get_public_key(&self) -> &str {
+        &self.public_key
+    }
+
+    pub fn get_signature(&self) -> Option<&str> {
+        self.signature.as_deref()
+    }
+
+    pub fn set_signature(&mut self, signature: String) {
+        self.signature = Some(signature);
+    }
+}
+
+impl PartialEq for NodePeer {
+    fn eq(&self, other: &Self) -> bool {
+        self.id == other.id
     }
 }

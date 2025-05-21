@@ -1,16 +1,15 @@
 mod api;
-mod config;
 mod crypto;
 mod error;
 mod logging;
 mod models;
 mod node;
+mod settings;
 mod uuid;
 
 use axum::body::Body;
 use base64::prelude::BASE64_STANDARD;
 use base64::Engine;
-use config::Config;
 use http_body_util::BodyExt as _;
 use log::LevelFilter;
 use models::{IndicatorType, ThreatIndicator};
@@ -21,7 +20,9 @@ use rustls::pki_types::{CertificateDer, PrivateKeyDer};
 use rustls::server::WebPkiClientVerifier;
 use rustls::RootCertStore;
 use serde_json::json;
+use settings::Settings;
 use std::path::Path;
+use std::str::FromStr;
 use std::sync::Arc;
 use tokio::sync::Mutex;
 
@@ -43,8 +44,8 @@ fn load_private_key(filename: &Path) -> PrivateKeyDer<'static> {
     PrivateKeyDer::from_pem_file(filename).expect("cannot read private key file")
 }
 
-fn make_server_config(config: &Config) -> Arc<rustls::ServerConfig> {
-    let client_auth = if let Some(auth) = &config.security.ca_path {
+fn make_server_config(settings: &settings::Settings) -> Arc<rustls::ServerConfig> {
+    let client_auth = if let Some(auth) = &settings.tls.ca {
         let roots = load_certs(auth);
         let mut client_auth_roots = RootCertStore::empty();
         for root in roots {
@@ -57,8 +58,8 @@ fn make_server_config(config: &Config) -> Arc<rustls::ServerConfig> {
         WebPkiClientVerifier::no_client_auth()
     };
 
-    let certs = load_certs(&config.security.tls_cert_path);
-    let privkey = load_private_key(&config.security.tls_key_path);
+    let certs = load_certs(&settings.tls.certs);
+    let privkey = load_private_key(&settings.tls.key);
 
     let config = rustls::ServerConfig::builder_with_provider(provider::default_provider().into())
         .with_safe_default_protocol_versions()
@@ -73,24 +74,31 @@ fn make_server_config(config: &Config) -> Arc<rustls::ServerConfig> {
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     init_logging();
-    let config = config::Config::load()?;
+    let settings = Settings::new()?;
     let mesh_identity = crypto::MeshIdentity::load_or_generate()?;
-    let mut key_mgr = crypto::SymmetricKeyManager::new(config.security.key_rotation_days);
-
-    let tls_config = make_server_config(&config);
+    let mut key_mgr = crypto::SymmetricKeyManager::new(settings.tls.key_rotation_days);
+    let tls_config = make_server_config(&settings);
 
     let logger = logging::EncryptedLogger::new(
-        config.storage.encrypted_logs_path.clone(),
+        settings.storage.encrypted_logs_path.clone(),
         key_mgr.clone(),
-        LevelFilter::Debug,
+        LevelFilter::from_str(&settings.log_level).unwrap(),
     )?;
 
-    let node = node::Node::new(mesh_identity.clone(), logger, config.privacy);
+    let node = node::Node::new(mesh_identity.clone(), logger, settings.privacy);
 
     let id = node.get_id();
     println!("Node ID: {:?}", id);
 
-    let data = NodePeer::new(id.to_string(), "127.0.0.1:3030".to_string());
+    let base64_pubkey = BASE64_STANDARD.encode(mesh_identity.verifying_key().to_bytes());
+
+    let mut data = NodePeer {
+        id: id.to_string(),
+        endpoint: "127.0.0.1:3030".to_string(),
+        public_key: base64_pubkey,
+        signature: None,
+    };
+
     let body = Body::from(serde_json::to_string(&data).unwrap());
 
     let bytes = body
@@ -99,16 +107,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         .expect("Failed to collect body")
         .to_bytes();
 
-    let signature = crypto::MeshIdentity::sign(mesh_identity.signing_key().unwrap().clone(), &bytes);
-    let base64_pubkey = BASE64_STANDARD.encode(mesh_identity.verifying_key().to_bytes());
-    println!(
-        "{}",
-        json!({
-            "data": data,
-            "X-Mesh-Public-Key": base64_pubkey,
-            "X-Mesh-Signature": signature,
-        })
-    );
+    let signature =
+        crypto::MeshIdentity::sign(mesh_identity.signing_key().unwrap().clone(), &bytes);
+
+    data.set_signature(signature);
+
+    println!("{}", json!(data));
 
     let indicator = ThreatIndicator::new(
         IndicatorType::Ipv4Address,
@@ -130,7 +134,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     {
         let mut node = node.lock().await;
         node.add_indicator(indicator.clone());
-        node.bootstrap_peers(config.network.default_peers.clone());
+        node.bootstrap_peers(settings.network.init_peers.clone());
     }
 
     let server_handle =
