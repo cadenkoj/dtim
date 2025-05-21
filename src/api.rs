@@ -13,8 +13,7 @@ use ed25519_dalek::VerifyingKey;
 use http_body_util::BodyExt as _;
 use rustls::ServerConfig;
 use serde::Serialize;
-use std::sync::Arc;
-use std::{io, str::FromStr};
+use std::{str::FromStr as _, sync::Arc};
 use tokio::sync::Mutex;
 
 use crate::{
@@ -141,12 +140,7 @@ pub async fn start_server(
     axum_server::bind_rustls(addr, tls_config)
         .serve(app.into_make_service())
         .await
-        .map_err(|e| {
-            io::Error::new(
-                io::ErrorKind::Other,
-                format!("Failed to start server: {}", e),
-            )
-        })?;
+        .map_err(|e| std::io::Error::other(format!("Failed to start server: {}", e)))?;
     Ok(())
 }
 

@@ -1,6 +1,6 @@
 use std::{
     collections::{BTreeSet, HashMap},
-    fmt, io,
+    fmt,
     net::IpAddr,
 };
 
@@ -69,11 +69,11 @@ impl ThreatIndicator {
     pub fn encrypt(
         &self,
         key_mgr: &mut SymmetricKeyManager,
-    ) -> Result<EncryptedThreatIndicator, io::Error> {
+    ) -> Result<EncryptedThreatIndicator, std::io::Error> {
         let serialized = serde_json::to_vec(self).expect("Failed to serialize ThreatIndicator");
-        let (ciphertext, nonce, mac) = key_mgr.encrypt(&serialized).map_err(|e| {
-            io::Error::new(io::ErrorKind::Other, format!("Encryption failed: {}", e))
-        })?;
+        let (ciphertext, nonce, mac) = key_mgr
+            .encrypt(&serialized)
+            .map_err(|e| std::io::Error::other(format!("Encryption failed: {}", e)))?;
 
         Ok(EncryptedThreatIndicator {
             ciphertext,
