@@ -15,8 +15,9 @@ pub struct TLSConfig {
 #[derive(Debug, Deserialize)]
 #[allow(unused)]
 pub struct StorageConfig {
-    pub database_url: String,
     pub encrypted_logs_path: PathBuf,
+    #[serde(skip_serializing)]
+    pub database_url: String,
 }
 
 #[derive(Debug, Deserialize)]
@@ -43,11 +44,12 @@ pub struct WatchersConfig {
     pub suricata_log_path: PathBuf,
     pub zeek_log_dir: PathBuf,
     pub clamav_scan_dir: PathBuf,
-    pub virustotal_api_key: String,
     pub nginx_access_log: PathBuf,
     pub nginx_error_log: PathBuf,
     pub apache_access_log: PathBuf,
     pub apache_error_log: PathBuf,
+    #[serde(skip_serializing)]
+    pub virustotal_api_key: String,
 }
 
 #[derive(Debug, Deserialize)]
@@ -76,9 +78,7 @@ impl Settings {
             .add_source(config::Environment::with_prefix("DTIM"))
             .build()?;
 
-        Ok(config
-            .try_deserialize::<Root>()
-            .expect("Failed to deserialize settings")
-            .default)
+        let root = config.try_deserialize::<Root>()?;
+        Ok(root.default)
     }
 }

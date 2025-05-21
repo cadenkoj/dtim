@@ -19,3 +19,6 @@ target/
 # testing credentials
 ca.key
 ca.srl
+
+# environment variables
+.env
