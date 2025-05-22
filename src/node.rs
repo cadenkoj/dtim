@@ -81,19 +81,22 @@ impl Node {
         &mut self,
         indicator: ThreatIndicator,
     ) -> Result<EncryptedIndicator, Box<dyn std::error::Error + Send + Sync>> {
-        use self::db::schema::encrypted_indicators;
+        use self::db::schema::encrypted_indicators::dsl::*;
 
         let encrypted_indicator = indicator.encrypt(&mut self.key_mgr)?;
 
         let mut conn = self.db_pool.get()?;
-        let res = diesel::insert_into(encrypted_indicators::table)
+        let res = diesel::insert_into(encrypted_indicators)
             .values(&encrypted_indicator)
+            .on_conflict(id)
+            .do_nothing()
             .returning(EncryptedIndicator::as_returning())
             .get_result(&mut conn)?;
 
-        let _ = self
-            .logger
-            .write_log(log::Level::Info, &format!("Added indicator: {:?}", res));
+        let _ = self.logger.write_log(
+            log::Level::Info,
+            &format!("Added indicator with id: {}", res.id),
+        );
         Ok(res)
     }
 
@@ -101,6 +104,11 @@ impl Node {
         &mut self,
         new_indicator: ThreatIndicator,
     ) -> Result<EncryptedIndicator, Box<dyn std::error::Error + Send + Sync>> {
+        /// FIXME: `add_indicator` inserts unconditionally – handle primary-key clashes.
+        /// If an indicator with the same deterministic UUID already exists, this insertion will violate the primary-key constraint and bubble an error.
+        /// Possible solution:
+        /// Use ON CONFLICT (id) DO UPDATE (diesel::upsert) to increment sightings. (TODO: possibly make sightings unencrypted metadata, TBD)
+        /// Failing to do so exposes the API to 500s on legitimate duplicate submissions.
         use self::db::schema::encrypted_indicators::dsl::*;
 
         let indicator_id = new_indicator.get_id();
@@ -128,7 +136,7 @@ impl Node {
 
             let _ = self.logger.write_log(
                 log::Level::Info,
-                &format!("Incrementing indicator: {:?}", res),
+                &format!("Incrementing indicator with id: {}", res.id),
             );
             Ok(res)
         } else {
@@ -178,7 +186,7 @@ impl Node {
         let indicators = indicators
             .iter()
             .map(|i| ThreatIndicator::decrypt(i, &self.key_mgr))
-            .collect::<Result<Vec<ThreatIndicator>, std::string::String>>()?;
+            .collect::<Result<Vec<ThreatIndicator>, std::io::Error>>()?;
 
         Ok(indicators)
     }
