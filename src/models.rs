@@ -4,11 +4,12 @@ use std::{
     net::IpAddr,
 };
 
-use crate::{crypto::SymmetricKeyManager, uuid::Uuid};
+use crate::{crypto::SymmetricKeyManager, db::models::EncryptedIndicator, uuid::Uuid};
 use chrono::{DateTime, Utc};
 use regex::Regex;
 use serde::{Deserialize, Serialize};
 use serde_json::json;
+use sha2::{Digest, Sha256};
 use std::hash::{Hash, Hasher};
 
 #[derive(Serialize, Deserialize, Clone, Debug)]
@@ -27,13 +28,6 @@ pub struct ThreatIndicator {
     pub marking_definitions: Vec<MarkingDefinition>,
 }
 
-#[derive(Serialize, Deserialize, Clone, Debug)]
-pub struct EncryptedThreatIndicator {
-    ciphertext: String,
-    nonce: String,
-    mac: String,
-}
-
 impl ThreatIndicator {
     pub fn new(
         indicator_type: IndicatorType,
@@ -42,12 +36,14 @@ impl ThreatIndicator {
         tags: Vec<String>,
         tlp: TlpLevel,
         custom_fields: Option<HashMap<String, serde_json::Value>>,
-    ) -> Self {
+    ) -> Result<Self, std::io::Error> {
+        let id = Self::compute_id(&indicator_type, &value, &tlp, &tags)
+            .map_err(|e| std::io::Error::other(format!("Failed to compute ID: {}", e)))?;
         let now = Utc::now();
         let marking_definition = MarkingDefinition::new("tlp".to_string(), tlp.to_string());
 
-        ThreatIndicator {
-            id: Uuid::new_v7_from_datetime(now),
+        Ok(ThreatIndicator {
+            id,
             indicator_type,
             value,
             confidence,
@@ -59,35 +55,58 @@ impl ThreatIndicator {
             recipients: None, // TODO: Handle recipients for TLP:RED
             custom_fields,
             marking_definitions: vec![marking_definition],
-        }
+        })
     }
 
-    pub fn get_id(&self) -> Uuid {
-        self.id
+    pub fn get_id(&self) -> String {
+        self.id.to_string()
+    }
+
+    pub fn compute_id(
+        indicator_type: &IndicatorType,
+        value: &str,
+        tlp: &TlpLevel,
+        tags: &[String],
+    ) -> Result<Uuid, std::io::Error> {
+        let mut hasher = Sha256::new();
+        hasher.update(indicator_type.to_string().as_bytes());
+        hasher.update(value.as_bytes());
+        hasher.update(tlp.to_string().as_bytes());
+        for tag in tags {
+            hasher.update(tag.as_bytes());
+        }
+        let hash = hasher.finalize();
+        Ok(Uuid::new_v5_from_hash(&hash))
     }
 
     pub fn encrypt(
         &self,
         key_mgr: &mut SymmetricKeyManager,
-    ) -> Result<EncryptedThreatIndicator, std::io::Error> {
+    ) -> Result<EncryptedIndicator, std::io::Error> {
         let serialized = serde_json::to_vec(self).expect("Failed to serialize ThreatIndicator");
         let (ciphertext, nonce, mac) = key_mgr
             .encrypt(&serialized)
             .map_err(|e| std::io::Error::other(format!("Encryption failed: {}", e)))?;
 
-        Ok(EncryptedThreatIndicator {
+        Ok(EncryptedIndicator {
+            id: self.id.to_string(),
             ciphertext,
             nonce,
             mac,
+            tlp_level: self.tlp.to_string(),
         })
     }
 
     pub fn decrypt(
-        encrypted: &EncryptedThreatIndicator,
+        encrypted: &EncryptedIndicator,
         key_mgr: &SymmetricKeyManager,
     ) -> Result<Self, String> {
         let decrypted = key_mgr
-            .decrypt(&encrypted.ciphertext, &encrypted.nonce, &encrypted.mac)
+            .decrypt(
+                encrypted.ciphertext.clone(),
+                encrypted.nonce.clone(),
+                encrypted.mac.clone(),
+            )
             .map_err(|e| format!("Decryption failed: {}", e))?;
 
         serde_json::from_slice(&decrypted)
@@ -264,7 +283,7 @@ impl MarkingDefinition {
         let now = Utc::now();
 
         MarkingDefinition {
-            id: Uuid::new_v7_from_datetime(now),
+            id: Uuid::now_v7(),
             created_at: now,
             definition_type: definition_type.clone(),
             definition: json!({

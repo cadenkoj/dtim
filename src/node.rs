@@ -1,31 +1,46 @@
 use crate::{
-    crypto::{self, MeshIdentity},
+    crypto::{self, MeshIdentity, SymmetricKeyManager},
+    db::{self, models::EncryptedIndicator},
     logging::EncryptedLogger,
     models::{PrivacyLevel, ThreatIndicator, TlpLevel},
     settings::PrivacyConfig,
-    uuid::Uuid,
 };
 use chrono::Utc;
+use diesel::{
+    pg::PgConnection,
+    query_dsl::methods::{FilterDsl, FindDsl},
+    r2d2::Pool,
+    OptionalExtension,
+};
+use diesel::{r2d2::ConnectionManager, ExpressionMethods};
+use diesel::{RunQueryDsl, SelectableHelper};
 use serde::{Deserialize, Serialize};
 use std::{collections::HashMap, io};
 
 #[derive(Clone, Debug)]
 pub struct Node {
     identity: MeshIdentity,
-    indicators: HashMap<Uuid, ThreatIndicator>,
     peers: HashMap<String, NodePeer>,
+    db_pool: Pool<ConnectionManager<PgConnection>>,
+    key_mgr: SymmetricKeyManager,
     logger: EncryptedLogger,
     privacy_level: PrivacyLevel,
     allow_custom_fields: bool,
 }
 
 impl Node {
-    pub fn new(logger: EncryptedLogger, privacy: PrivacyConfig) -> Result<Self, std::io::Error> {
+    pub fn new(
+        db_pool: Pool<ConnectionManager<PgConnection>>,
+        key_mgr: SymmetricKeyManager,
+        logger: EncryptedLogger,
+        privacy: PrivacyConfig,
+    ) -> Result<Self, std::io::Error> {
         let identity = crypto::MeshIdentity::load_or_generate()?;
         Ok(Node {
             identity,
-            indicators: HashMap::new(),
             peers: HashMap::new(),
+            db_pool,
+            key_mgr,
             logger,
             privacy_level: match privacy.level.as_str() {
                 "strict" => PrivacyLevel::Strict,
@@ -62,49 +77,119 @@ impl Node {
         );
     }
 
-    pub fn add_indicator(&mut self, indicator: ThreatIndicator) -> Uuid {
-        let id = indicator.get_id();
-        self.indicators.insert(id, indicator.clone());
-        let _ = self.logger.write_log(
-            log::Level::Info,
-            &format!("Adding indicator: {:?}", indicator),
-        );
-        id
+    pub fn add_indicator(
+        &mut self,
+        indicator: ThreatIndicator,
+    ) -> Result<EncryptedIndicator, Box<dyn std::error::Error + Send + Sync>> {
+        use self::db::schema::encrypted_indicators;
+
+        let encrypted_indicator = indicator.encrypt(&mut self.key_mgr)?;
+
+        let mut conn = self.db_pool.get()?;
+        let res = diesel::insert_into(encrypted_indicators::table)
+            .values(&encrypted_indicator)
+            .returning(EncryptedIndicator::as_returning())
+            .get_result(&mut conn)?;
+
+        let _ = self
+            .logger
+            .write_log(log::Level::Info, &format!("Added indicator: {:?}", res));
+        Ok(res)
     }
 
-    pub fn add_or_increment_indicator(&mut self, new_indicator: ThreatIndicator) -> Uuid {
-        let id = new_indicator.get_id();
-        if let Some(existing) = self.indicators.get_mut(&id) {
-            existing.sightings += 1;
-            existing.updated_at = Utc::now();
+    pub fn add_or_increment_indicator(
+        &mut self,
+        new_indicator: ThreatIndicator,
+    ) -> Result<EncryptedIndicator, Box<dyn std::error::Error + Send + Sync>> {
+        use self::db::schema::encrypted_indicators::dsl::*;
+
+        let indicator_id = new_indicator.get_id();
+
+        let mut conn = self.db_pool.get()?;
+        let existing: Option<EncryptedIndicator> = encrypted_indicators
+            .find(&indicator_id)
+            .first::<EncryptedIndicator>(&mut conn)
+            .optional()?;
+
+        if let Some(encrypted) = existing {
+            let mut indicator = ThreatIndicator::decrypt(&encrypted, &self.key_mgr)?;
+            indicator.sightings += 1;
+            indicator.updated_at = Utc::now();
+
+            let new_encrypted = indicator.encrypt(&mut self.key_mgr)?;
+            let res = diesel::update(encrypted_indicators.find(&indicator_id))
+                .set((
+                    ciphertext.eq(new_encrypted.ciphertext),
+                    nonce.eq(new_encrypted.nonce),
+                    mac.eq(new_encrypted.mac),
+                ))
+                .returning(EncryptedIndicator::as_returning())
+                .get_result(&mut conn)?;
+
             let _ = self.logger.write_log(
                 log::Level::Info,
-                &format!("Incrementing indicator: {:?}", existing),
+                &format!("Incrementing indicator: {:?}", res),
             );
+            Ok(res)
         } else {
-            self.add_indicator(new_indicator);
+            let encrypted = new_indicator.encrypt(&mut self.key_mgr)?;
+            let res = diesel::insert_into(encrypted_indicators)
+                .values(&encrypted)
+                .returning(EncryptedIndicator::as_returning())
+                .get_result(&mut conn)?;
+
+            let _ = self
+                .logger
+                .write_log(log::Level::Info, &format!("Adding indicator: {:?}", res));
+            Ok(res)
         }
-        id
     }
 
     pub fn get_level(&self) -> PrivacyLevel {
         self.privacy_level
     }
 
-    pub fn get_indicator_by_id(&self, id: &Uuid) -> Option<&ThreatIndicator> {
-        self.indicators.get(id)
+    pub fn get_indicator_by_id(
+        &self,
+        indicator_id: &String,
+    ) -> Result<ThreatIndicator, Box<dyn std::error::Error + Send + Sync>> {
+        use self::db::schema::encrypted_indicators::dsl::*;
+
+        let mut conn = self.db_pool.get()?;
+        let indicator = encrypted_indicators
+            .find(indicator_id)
+            .first::<EncryptedIndicator>(&mut conn)?;
+
+        let indicator = ThreatIndicator::decrypt(&indicator, &self.key_mgr)?;
+        Ok(indicator)
     }
 
-    pub fn list_indicators_by_tlp(&self, tlp: TlpLevel) -> Vec<ThreatIndicator> {
-        self.indicators
-            .values()
-            .filter(|i| i.tlp == tlp)
-            .cloned()
-            .collect()
+    pub fn list_indicators_by_tlp(
+        &self,
+        tlp: TlpLevel,
+    ) -> Result<Vec<ThreatIndicator>, Box<dyn std::error::Error + Send + Sync>> {
+        use self::db::schema::encrypted_indicators::dsl::*;
+
+        let mut conn = self.db_pool.get()?;
+        let indicators = encrypted_indicators
+            .filter(tlp_level.eq(tlp.to_string()))
+            .load::<EncryptedIndicator>(&mut conn)?;
+
+        let indicators = indicators
+            .iter()
+            .map(|i| ThreatIndicator::decrypt(i, &self.key_mgr))
+            .collect::<Result<Vec<ThreatIndicator>, std::string::String>>()?;
+
+        Ok(indicators)
     }
 
-    pub fn list_objects_by_tlp(&self, tlp: TlpLevel) -> Vec<serde_json::Value> {
-        let indicators: Vec<_> = self.list_indicators_by_tlp(tlp);
+    pub fn list_objects_by_tlp(
+        &self,
+        tlp: TlpLevel,
+    ) -> Result<Vec<serde_json::Value>, Box<dyn std::error::Error + Send + Sync>> {
+        let indicators = self.list_indicators_by_tlp(tlp)?;
+
+        println!("Indicators: {:?}", indicators);
 
         let mut stix_indicators: Vec<serde_json::Value> = indicators
             .iter()
@@ -118,7 +203,7 @@ impl Node {
 
         stix_indicators.extend(stix_mds);
         stix_indicators.sort_by(|a, b| a["id"].as_str().unwrap().cmp(b["id"].as_str().unwrap()));
-        stix_indicators
+        Ok(stix_indicators)
     }
 
     pub fn get_peers(&self) -> &HashMap<String, NodePeer> {
