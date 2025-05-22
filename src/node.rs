@@ -10,6 +10,7 @@ use diesel::{
     pg::PgConnection,
     query_dsl::methods::{FilterDsl, FindDsl},
     r2d2::Pool,
+    upsert::excluded,
     OptionalExtension,
 };
 use diesel::{r2d2::ConnectionManager, ExpressionMethods};
@@ -104,11 +105,6 @@ impl Node {
         &mut self,
         new_indicator: ThreatIndicator,
     ) -> Result<EncryptedIndicator, Box<dyn std::error::Error + Send + Sync>> {
-        /// FIXME: `add_indicator` inserts unconditionally – handle primary-key clashes.
-        /// If an indicator with the same deterministic UUID already exists, this insertion will violate the primary-key constraint and bubble an error.
-        /// Possible solution:
-        /// Use ON CONFLICT (id) DO UPDATE (diesel::upsert) to increment sightings. (TODO: possibly make sightings unencrypted metadata, TBD)
-        /// Failing to do so exposes the API to 500s on legitimate duplicate submissions.
         use self::db::schema::encrypted_indicators::dsl::*;
 
         let indicator_id = new_indicator.get_id();
@@ -143,6 +139,9 @@ impl Node {
             let encrypted = new_indicator.encrypt(&mut self.key_mgr)?;
             let res = diesel::insert_into(encrypted_indicators)
                 .values(&encrypted)
+                .on_conflict(id)
+                .do_update()
+                .set(ciphertext.eq(excluded(ciphertext))) // Update with the new values
                 .returning(EncryptedIndicator::as_returning())
                 .get_result(&mut conn)?;
 
