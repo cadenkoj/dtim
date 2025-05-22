@@ -1,1 +1,1 @@
-DROP TABLE encrypted_indicators;
+DROP TABLE IF EXISTS encrypted_indicators CASCADE;

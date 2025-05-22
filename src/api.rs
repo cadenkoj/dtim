@@ -200,13 +200,16 @@ async fn gossip_indicators_handler(
     State(state): State<Arc<AppState>>,
     Json(indicators): Json<Vec<EncryptedIndicator>>,
 ) -> ApiResponse<GossipIndicatorsResponse> {
+    let mut decrypted: Vec<ThreatIndicator> = indicators
+        .into_iter()
+        .filter_map(|enc| ThreatIndicator::decrypt(&enc, &state.key_mgr).ok())
+        .collect();
     let mut node = state.node.lock().await;
     let mut count = 0;
-    for encrypted in indicators {
-        if let Ok(indicator) = ThreatIndicator::decrypt(&encrypted, &state.key_mgr) {
-            node.add_or_increment_indicator(indicator)
-                .map_err(|_| ApiError::INTERNAL_SERVER_ERROR)?;
-            count += 1;
+    for indicator in decrypted.drain(..) {
+        match node.add_or_increment_indicator(indicator) {
+            Ok(_) => count += 1,
+            Err(_) => log::error!("DB insert failed"),
         }
     }
     Ok((

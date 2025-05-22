@@ -1,8 +1,9 @@
 use aes_gcm::aead::rand_core::RngCore;
 use aes_gcm::aead::{Aead, KeyInit, OsRng};
 use aes_gcm::{Aes256Gcm, Key, Nonce};
-use std::fs::{self, File};
+use std::fs::{self, File, OpenOptions};
 use std::io::{Read, Write};
+use std::os::unix::fs::OpenOptionsExt as _;
 use std::path::Path;
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -26,14 +27,15 @@ impl SymmetricKeyManager {
         let mut current_bytes = [0u8; 32];
         let mut prev_bytes = [0u8; 32];
 
-        let current_key = if Path::new(SYMM_KEY_PATH).exists() {
-            File::open(SYMM_KEY_PATH)?.read_exact(&mut current_bytes)?;
+        let current_key = if Path::new(SYMM_KEY_PATH).exists()
+            && File::open(SYMM_KEY_PATH)
+                .and_then(|mut f| f.read_exact(&mut current_bytes))
+                .is_ok()
+        {
             Key::<Aes256Gcm>::from_slice(&current_bytes).to_owned()
         } else {
-            let key = Self::generate_key();
-            let mut file = File::create(SYMM_KEY_PATH)?;
-            file.write_all(key.as_slice())?;
-            key
+            log::warn!("symm.key missing or invalid – generating new key");
+            Self::generate_key()?
         };
 
         let previous_key = if Path::new(SYMM_PREV_KEY_PATH).exists() {
@@ -56,24 +58,18 @@ impl SymmetricKeyManager {
         })
     }
 
-    fn generate_key() -> Key<Aes256Gcm> {
+    fn generate_key() -> std::io::Result<Key<Aes256Gcm>> {
         let mut key_bytes = [0u8; 32];
         OsRng.fill_bytes(&mut key_bytes);
-        Key::<Aes256Gcm>::from_slice(&key_bytes).to_owned()
-    }
-
-    pub fn save_keys(&self) -> std::io::Result<()> {
-        fs::create_dir_all("data/keys")?;
-        let mut file = File::create(SYMM_KEY_PATH)?;
-        file.write_all(self.current_key.as_slice())?;
-
-        if let Some(prev) = &self.previous_key {
-            let mut prev_file = File::create(SYMM_PREV_KEY_PATH)?;
-            prev_file.write_all(prev.as_slice())?;
-        } else if Path::new(SYMM_PREV_KEY_PATH).exists() {
-            fs::remove_file(SYMM_PREV_KEY_PATH)?;
-        }
-        Ok(())
+        let key = Key::<Aes256Gcm>::from_slice(&key_bytes).to_owned();
+        let mut file = OpenOptions::new()
+            .write(true)
+            .create(true)
+            .truncate(true)
+            .mode(0o600)
+            .open(SYMM_KEY_PATH)?;
+        file.write_all(key.as_slice())?;
+        Ok(key)
     }
 
     pub fn rotate_key(&mut self) -> std::io::Result<()> {
@@ -83,9 +79,19 @@ impl SymmetricKeyManager {
             .as_secs();
         if now - self.key_rotation_time >= self.rotation_interval {
             self.previous_key = Some(self.current_key);
-            self.current_key = Self::generate_key();
+            self.current_key = Self::generate_key()?;
             self.key_rotation_time = now;
-            self.save_keys()?;
+            if let Some(prev) = &self.previous_key {
+                let mut prev_file = OpenOptions::new()
+                    .write(true)
+                    .create(true)
+                    .truncate(true)
+                    .mode(0o600)
+                    .open(SYMM_PREV_KEY_PATH)?;
+                prev_file.write_all(prev.as_slice())?;
+            } else if Path::new(SYMM_PREV_KEY_PATH).exists() {
+                fs::remove_file(SYMM_PREV_KEY_PATH)?;
+            }
         }
         Ok(())
     }
@@ -112,6 +118,9 @@ impl SymmetricKeyManager {
         tag: Vec<u8>,
     ) -> Result<Vec<u8>, String> {
         ciphertext.extend_from_slice(&tag);
+        if nonce.len() != 12 {
+            return Err("Invalid nonce length".into());
+        }
         let nonce = Nonce::from_slice(&nonce);
         let try_decrypt = |key: &Key<Aes256Gcm>| {
             let cipher = Aes256Gcm::new(key);
