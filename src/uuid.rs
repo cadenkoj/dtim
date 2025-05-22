@@ -60,12 +60,17 @@ impl Deref for Uuid {
 
 impl Uuid {
     /// Generate a new UUID
-    pub fn new() -> Self {
-        Self(uuid::Uuid::now_v7())
+    pub fn new_v7() -> Self {
+        Self::now_v7()
     }
     /// Generate a new V7 UUID
-    pub fn new_v7() -> Self {
-        Self(uuid::Uuid::now_v7())
+    pub fn now_v7() -> Self {
+        let ctx = TIMESTAMP_CONTEXT.lock().unwrap();
+        Self(uuid::Uuid::new_v7(uuid::Timestamp::now(&*ctx)))
+    }
+    /// Generate a new V5 UUID
+    pub fn new_v5_from_hash(hash: &[u8]) -> Self {
+        Self(uuid::Uuid::new_v5(&uuid::Uuid::NAMESPACE_OID, hash))
     }
     /// Generate a new V7 UUID
     pub fn new_v7_from_datetime(timestamp: DateTime<Utc>) -> Self {

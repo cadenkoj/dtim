@@ -13,19 +13,17 @@ use ed25519_dalek::VerifyingKey;
 use http_body_util::BodyExt as _;
 use rustls::ServerConfig;
 use serde::Serialize;
-use std::{str::FromStr as _, sync::Arc};
+use std::sync::Arc;
 use tokio::sync::Mutex;
 
+use crate::models::ThreatIndicator;
 use crate::{
     crypto::MeshIdentity,
+    db::models::EncryptedIndicator,
     error::{ApiError, ApiErrorResponse},
     node::{Node, NodePeer},
 };
 use crate::{crypto::SymmetricKeyManager, models::StixBundle};
-use crate::{
-    models::{EncryptedThreatIndicator, ThreatIndicator},
-    uuid::Uuid,
-};
 
 #[derive(Clone)]
 pub struct AppState {
@@ -200,13 +198,14 @@ struct GossipIndicatorsResponse {
 
 async fn gossip_indicators_handler(
     State(state): State<Arc<AppState>>,
-    Json(indicators): Json<Vec<EncryptedThreatIndicator>>,
+    Json(indicators): Json<Vec<EncryptedIndicator>>,
 ) -> ApiResponse<GossipIndicatorsResponse> {
     let mut node = state.node.lock().await;
     let mut count = 0;
     for encrypted in indicators {
         if let Ok(indicator) = ThreatIndicator::decrypt(&encrypted, &state.key_mgr) {
-            node.add_or_increment_indicator(indicator);
+            node.add_or_increment_indicator(indicator)
+                .map_err(|_| ApiError::INTERNAL_SERVER_ERROR)?;
             count += 1;
         }
     }
@@ -229,7 +228,9 @@ async fn get_public_indicators_handler(
     State(state): State<Arc<AppState>>,
 ) -> ApiResponse<GetIndicatorsResponse> {
     let node = state.node.lock().await;
-    let indicators = node.list_indicators_by_tlp(crate::models::TlpLevel::White);
+    let indicators = node
+        .list_indicators_by_tlp(crate::models::TlpLevel::White)
+        .map_err(|_| ApiError::INTERNAL_SERVER_ERROR)?;
     // Return anonymized (open) view
     Ok((
         StatusCode::OK,
@@ -244,7 +245,9 @@ async fn get_private_indicators_handler(
     State(state): State<Arc<AppState>>,
 ) -> ApiResponse<GetIndicatorsResponse> {
     let node = state.node.lock().await;
-    let indicators = node.list_indicators_by_tlp(crate::models::TlpLevel::Red);
+    let indicators = node
+        .list_indicators_by_tlp(crate::models::TlpLevel::Red)
+        .map_err(|_| ApiError::INTERNAL_SERVER_ERROR)?;
     // TODO: Ensure the node is an authenticated recipient for private indicators
     // Return anonymized (moderate) view
     Ok((
@@ -261,8 +264,9 @@ async fn get_indicator_by_id_handler(
     Path(id): Path<String>,
 ) -> ApiResponse<serde_json::Value> {
     let node = state.node.lock().await;
-    let id = Uuid::from_str(&id).map_err(|_| ApiError::INVALID_INDICATOR_ID)?;
-    let indicator = node.get_indicator_by_id(&id).ok_or(ApiError::NOT_FOUND)?;
+    let indicator = node
+        .get_indicator_by_id(&id)
+        .map_err(|_| ApiError::NOT_FOUND)?;
     Ok((StatusCode::OK, Json(indicator.to_json(node.get_level()))))
 }
 
@@ -319,7 +323,12 @@ async fn taxii_get_objects_handler(
     Path(_collection_id): Path<String>,
 ) -> ApiResponse<serde_json::Value> {
     let node = state.node.lock().await;
-    let stix_objects = node.list_objects_by_tlp(crate::models::TlpLevel::White);
+    let stix_objects = node
+        .list_objects_by_tlp(crate::models::TlpLevel::White)
+        .map_err(|error| {
+            println!("Error: {:?}", error);
+            ApiError::INTERNAL_SERVER_ERROR
+        })?;
     let bundle = StixBundle::new(stix_objects);
     Ok((StatusCode::OK, Json(bundle.to_stix())))
 }
@@ -331,6 +340,7 @@ async fn taxii_post_objects_handler(
 ) -> ApiResponse<serde_json::Value> {
     let indicator = ThreatIndicator::from_stix(stix).map_err(|_| ApiError::INVALID_STIX_OBJECT)?;
     let mut node = state.node.lock().await;
-    node.add_indicator(indicator);
+    node.add_indicator(indicator)
+        .map_err(|_| ApiError::INTERNAL_SERVER_ERROR)?;
     Ok((StatusCode::OK, Json(serde_json::json!({ "status": "ok" }))))
 }

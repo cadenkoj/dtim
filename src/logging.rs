@@ -1,3 +1,5 @@
+use base64::prelude::BASE64_STANDARD;
+use base64::Engine as _;
 use chrono::Utc;
 use log::{error, Level, LevelFilter, Metadata, Record};
 use std::fs::{self, OpenOptions};
@@ -37,7 +39,12 @@ impl EncryptedLogger {
             .key_mgr
             .encrypt(log_entry.as_bytes())
             .map_err(|e| std::io::Error::other(format!("Encryption failed: {}", e)))?;
-        let encrypted_entry = format!("{}\n{}\n{}\n", ciphertext, nonce, mac);
+        let encrypted_entry = format!(
+            "{}\n{}\n{}\n",
+            BASE64_STANDARD.encode(ciphertext),
+            BASE64_STANDARD.encode(nonce),
+            BASE64_STANDARD.encode(mac)
+        );
 
         let filename = format!("{}.log", Utc::now().format("%Y-%m-%d"));
         let log_file = self.log_path.join(filename);
@@ -66,15 +73,24 @@ impl EncryptedLogger {
 
         let mut lines = content.lines().peekable();
         while lines.peek().is_some() {
-            let ciphertext = lines.next().ok_or_else(|| {
-                std::io::Error::new(std::io::ErrorKind::InvalidData, "Invalid log format")
-            })?;
-            let nonce = lines.next().ok_or_else(|| {
-                std::io::Error::new(std::io::ErrorKind::InvalidData, "Invalid log format")
-            })?;
-            let mac = lines.next().ok_or_else(|| {
-                std::io::Error::new(std::io::ErrorKind::InvalidData, "Invalid log format")
-            })?;
+            let ciphertext = lines
+                .next()
+                .and_then(|line| BASE64_STANDARD.decode(line).ok())
+                .ok_or_else(|| {
+                    std::io::Error::new(std::io::ErrorKind::InvalidData, "Invalid log format")
+                })?;
+            let nonce = lines
+                .next()
+                .and_then(|line| BASE64_STANDARD.decode(line).ok())
+                .ok_or_else(|| {
+                    std::io::Error::new(std::io::ErrorKind::InvalidData, "Invalid log format")
+                })?;
+            let mac = lines
+                .next()
+                .and_then(|line| BASE64_STANDARD.decode(line).ok())
+                .ok_or_else(|| {
+                    std::io::Error::new(std::io::ErrorKind::InvalidData, "Invalid log format")
+                })?;
 
             match self.key_mgr.decrypt(ciphertext, nonce, mac) {
                 Ok(decrypted) => {

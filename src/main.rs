@@ -1,5 +1,6 @@
 mod api;
 mod crypto;
+mod db;
 mod error;
 mod logging;
 mod models;
@@ -76,7 +77,8 @@ fn make_server_config(settings: &settings::Settings) -> Arc<rustls::ServerConfig
 async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     init_logging();
     let settings = Settings::new()?;
-    let mut key_mgr = crypto::SymmetricKeyManager::new(settings.tls.key_rotation_days);
+    let mut key_mgr =
+        crypto::SymmetricKeyManager::load_or_generate(settings.tls.key_rotation_days)?;
     let tls_config = make_server_config(&settings);
 
     let logger = logging::EncryptedLogger::new(
@@ -91,7 +93,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         }),
     )?;
 
-    let node = node::Node::new(logger, settings.privacy)?;
+    println!("Database URL: {:?}", settings.storage.database_url);
+    let db_pool = db::get_connection_pool(&settings.storage.database_url)?;
+    let node = node::Node::new(db_pool, key_mgr.clone(), logger, settings.privacy)?;
 
     let id = node.get_id();
     println!("Node ID: {:?}", id);
@@ -130,19 +134,25 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         vec!["malicious-activity".to_string()],
         models::TlpLevel::White,
         None,
+    )
+    .unwrap();
+
+    let encrypted = indicator.encrypt(&mut key_mgr).unwrap();
+    println!(
+        "Encrypted: {:?}",
+        serde_json::to_string(&encrypted).unwrap()
     );
 
-    let encrypted = indicator.encrypt(&mut key_mgr);
-    println!("Encrypted: {:?}", encrypted);
+    let _ = key_mgr.rotate_key();
 
-    let decrypted = ThreatIndicator::decrypt(&encrypted.unwrap(), &key_mgr);
+    let decrypted = ThreatIndicator::decrypt(&encrypted, &key_mgr).unwrap();
     println!("Decrypted: {:?}", decrypted);
 
     let node = Arc::new(Mutex::new(node));
 
     {
         let mut node = node.lock().await;
-        node.add_indicator(indicator.clone());
+        let _ = node.add_or_increment_indicator(indicator.clone());
         node.bootstrap_peers(settings.network.init_peers.clone());
     }
 
