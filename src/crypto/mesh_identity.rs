@@ -2,8 +2,9 @@ use aes_gcm::aead::OsRng;
 use base64::{engine::general_purpose::STANDARD as BASE64_STANDARD, Engine as _};
 use ed25519_dalek::{Signature, Signer, SigningKey, Verifier, VerifyingKey};
 use sha2::{Digest as _, Sha256};
-use std::fs::{self, File};
+use std::fs::{self, File, OpenOptions};
 use std::io::{Read, Write};
+use std::os::unix::fs::OpenOptionsExt as _;
 use std::path::Path;
 
 pub const PRIVATE_KEY_PATH: &str = "data/keys/mesh.key";
@@ -48,8 +49,20 @@ impl MeshIdentity {
         let mut csprng = OsRng;
         let signing_key = SigningKey::generate(&mut csprng);
         let verifying_key = signing_key.verifying_key();
-        File::create(PRIVATE_KEY_PATH)?.write_all(&signing_key.to_bytes())?;
-        File::create(PUBLIC_KEY_PATH)?.write_all(&verifying_key.to_bytes())?;
+        let mut priv_file = OpenOptions::new()
+            .write(true)
+            .create(true)
+            .truncate(true)
+            .mode(0o600)
+            .open(PRIVATE_KEY_PATH)?;
+        let mut pub_file = OpenOptions::new()
+            .write(true)
+            .create(true)
+            .truncate(true)
+            .mode(0o600)
+            .open(PUBLIC_KEY_PATH)?;
+        priv_file.write_all(&signing_key.to_bytes())?;
+        pub_file.write_all(&verifying_key.to_bytes())?;
         Ok(())
     }
 
