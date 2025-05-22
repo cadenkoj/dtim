@@ -72,7 +72,9 @@ impl ThreatIndicator {
         hasher.update(indicator_type.to_string().as_bytes());
         hasher.update(value.as_bytes());
         hasher.update(tlp.to_string().as_bytes());
-        for tag in tags {
+        let mut sorted_tags: Vec<&String> = tags.iter().collect();
+        sorted_tags.sort();
+        for tag in sorted_tags {
             hasher.update(tag.as_bytes());
         }
         let hash = hasher.finalize();
@@ -83,7 +85,8 @@ impl ThreatIndicator {
         &self,
         key_mgr: &mut SymmetricKeyManager,
     ) -> Result<EncryptedIndicator, std::io::Error> {
-        let serialized = serde_json::to_vec(self).expect("Failed to serialize ThreatIndicator");
+        let serialized = serde_json::to_vec(self)
+            .map_err(|e| std::io::Error::other(format!("Serialization failed: {e}")))?;
         let (ciphertext, nonce, mac) = key_mgr
             .encrypt(&serialized)
             .map_err(|e| std::io::Error::other(format!("Encryption failed: {}", e)))?;
@@ -100,17 +103,18 @@ impl ThreatIndicator {
     pub fn decrypt(
         encrypted: &EncryptedIndicator,
         key_mgr: &SymmetricKeyManager,
-    ) -> Result<Self, String> {
+    ) -> Result<Self, std::io::Error> {
         let decrypted = key_mgr
             .decrypt(
                 encrypted.ciphertext.clone(),
                 encrypted.nonce.clone(),
                 encrypted.mac.clone(),
             )
-            .map_err(|e| format!("Decryption failed: {}", e))?;
+            .map_err(|e| std::io::Error::other(format!("Decryption failed: {}", e)))?;
 
-        serde_json::from_slice(&decrypted)
-            .map_err(|e| format!("Failed to deserialize ThreatIndicator: {}", e))
+        serde_json::from_slice(&decrypted).map_err(|e| {
+            std::io::Error::other(format!("Failed to deserialize ThreatIndicator: {}", e))
+        })
     }
 
     #[allow(unused)] // TODO: implement in watchers
