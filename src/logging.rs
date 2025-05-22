@@ -1,7 +1,7 @@
 use base64::prelude::BASE64_STANDARD;
 use base64::Engine as _;
 use chrono::Utc;
-use log::{error, Level, LevelFilter, Metadata, Record};
+use log::{error, Level, LevelFilter, Log, Metadata, Record};
 use std::fs::{self, OpenOptions};
 use std::io::Write as _;
 use std::path::PathBuf;
@@ -106,7 +106,7 @@ impl EncryptedLogger {
     }
 }
 
-impl log::Log for EncryptedLogger {
+impl Log for EncryptedLogger {
     fn enabled(&self, metadata: &Metadata) -> bool {
         metadata.level() <= self.level
     }
