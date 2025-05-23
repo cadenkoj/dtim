@@ -1,48 +1,45 @@
 use crate::{
-    crypto::{self, MeshIdentity, SymmetricKeyManager},
+    crypto::{MeshIdentity, MeshIdentityManager, SymmetricKeyManager},
     db::{self, models::EncryptedIndicator},
-    logging::EncryptedLogger,
     models::{PrivacyLevel, ThreatIndicator, TlpLevel},
     settings::PrivacyConfig,
 };
 use chrono::Utc;
-use diesel::{
-    pg::PgConnection,
-    query_dsl::methods::{FilterDsl, FindDsl},
-    r2d2::Pool,
-    upsert::excluded,
-    OptionalExtension,
-};
+use diesel::{pg::PgConnection, r2d2::Pool, upsert::excluded, OptionalExtension as _, QueryDsl};
 use diesel::{r2d2::ConnectionManager, ExpressionMethods};
 use diesel::{RunQueryDsl, SelectableHelper};
 use serde::{Deserialize, Serialize};
-use std::{collections::HashMap, io};
+use std::{collections::HashMap, io, sync::Arc};
+use tokio::sync::Mutex;
 
-#[derive(Clone, Debug)]
+#[derive(Clone)]
 pub struct Node {
     identity: MeshIdentity,
     peers: HashMap<String, NodePeer>,
     db_pool: Pool<ConnectionManager<PgConnection>>,
-    key_mgr: SymmetricKeyManager,
-    logger: EncryptedLogger,
+    key_mgr: Arc<Mutex<SymmetricKeyManager>>,
+    // logger: EncryptedLogger,
     privacy_level: PrivacyLevel,
     allow_custom_fields: bool,
 }
 
 impl Node {
-    pub fn new(
+    pub async fn new(
         db_pool: Pool<ConnectionManager<PgConnection>>,
-        key_mgr: SymmetricKeyManager,
-        logger: EncryptedLogger,
+        key_mgr: Arc<Mutex<SymmetricKeyManager>>,
+        mesh_identity_mgr: Arc<Mutex<MeshIdentityManager>>,
+        // logger: EncryptedLogger,
         privacy: PrivacyConfig,
     ) -> Result<Self, std::io::Error> {
-        let identity = crypto::MeshIdentity::load_or_generate()?;
+        let mesh_identity_mgr = mesh_identity_mgr.lock().await;
+        let identity = mesh_identity_mgr.get_identity().clone();
+        drop(mesh_identity_mgr);
         Ok(Node {
             identity,
             peers: HashMap::new(),
             db_pool,
             key_mgr,
-            logger,
+            // logger,
             privacy_level: match privacy.level.as_str() {
                 "strict" => PrivacyLevel::Strict,
                 "open" => PrivacyLevel::Open,
@@ -57,34 +54,34 @@ impl Node {
     }
 
     pub fn get_id(&self) -> String {
-        MeshIdentity::derive_hex_id(&self.identity.verifying_key().to_bytes())
+        MeshIdentityManager::derive_hex_id(&self.identity.verifying_key().to_bytes())
     }
 
     pub fn bootstrap_peers(&mut self, peers: Vec<NodePeer>) {
         for peer in peers {
             self.peers.insert(peer.get_id().to_string(), peer.clone());
-            let _ = self.logger.write_log(
-                log::Level::Info,
-                &format!("Bootstrapping peer: {}", peer.get_endpoint()),
-            );
+            // let _ = self.logger.write_log(
+            //     log::Level::Info,
+            //     &format!("Bootstrapping peer: {}", peer.get_endpoint()),
+            // );
         }
     }
 
     pub fn add_peer(&mut self, peer: &NodePeer) {
         self.peers.insert(peer.get_id().to_string(), peer.clone());
-        let _ = self.logger.write_log(
-            log::Level::Info,
-            &format!("Adding peer: {}", peer.get_endpoint()),
-        );
+        // let _ = self.logger.write_log(
+        //     log::Level::Info,
+        //     &format!("Adding peer: {}", peer.get_endpoint()),
+        // );
     }
 
-    pub fn add_indicator(
+    pub async fn add_indicator(
         &mut self,
         indicator: ThreatIndicator,
     ) -> Result<EncryptedIndicator, Box<dyn std::error::Error + Send + Sync>> {
         use self::db::schema::encrypted_indicators::dsl::*;
 
-        let encrypted_indicator = indicator.encrypt(&mut self.key_mgr)?;
+        let encrypted_indicator = indicator.encrypt(&mut self.key_mgr).await?;
 
         let mut conn = self.db_pool.get()?;
         let res = diesel::insert_into(encrypted_indicators)
@@ -94,14 +91,14 @@ impl Node {
             .returning(EncryptedIndicator::as_returning())
             .get_result(&mut conn)?;
 
-        let _ = self.logger.write_log(
-            log::Level::Info,
-            &format!("Added indicator with id: {}", res.id),
-        );
+        // let _ = self.logger.write_log(
+        //     log::Level::Info,
+        //     &format!("Added indicator with id: {}", res.id),
+        // );
         Ok(res)
     }
 
-    pub fn add_or_increment_indicator(
+    pub async fn add_or_increment_indicator(
         &mut self,
         new_indicator: ThreatIndicator,
     ) -> Result<EncryptedIndicator, Box<dyn std::error::Error + Send + Sync>> {
@@ -116,38 +113,34 @@ impl Node {
             .optional()?;
 
         if let Some(encrypted) = existing {
-            let mut indicator = ThreatIndicator::decrypt(&encrypted, &self.key_mgr)?;
+            let mut indicator = ThreatIndicator::decrypt(&encrypted.data, &self.key_mgr).await?;
             indicator.sightings += 1;
             indicator.updated_at = Utc::now();
 
-            let new_encrypted = indicator.encrypt(&mut self.key_mgr)?;
+            let new_encrypted = indicator.encrypt(&mut self.key_mgr).await?;
             let res = diesel::update(encrypted_indicators.find(&indicator_id))
-                .set((
-                    ciphertext.eq(new_encrypted.ciphertext),
-                    nonce.eq(new_encrypted.nonce),
-                    mac.eq(new_encrypted.mac),
-                ))
+                .set((data.eq(new_encrypted.data),))
                 .returning(EncryptedIndicator::as_returning())
                 .get_result(&mut conn)?;
 
-            let _ = self.logger.write_log(
-                log::Level::Info,
-                &format!("Incrementing indicator with id: {}", res.id),
-            );
+            // let _ = self.logger.write_log(
+            //     log::Level::Info,
+            //     &format!("Incrementing indicator with id: {}", res.id),
+            // );
             Ok(res)
         } else {
-            let encrypted = new_indicator.encrypt(&mut self.key_mgr)?;
+            let encrypted = new_indicator.encrypt(&mut self.key_mgr).await?;
             let res = diesel::insert_into(encrypted_indicators)
                 .values(&encrypted)
                 .on_conflict(id)
                 .do_update()
-                .set(ciphertext.eq(excluded(ciphertext))) // Update with the new values
+                .set(data.eq(excluded(data))) // Update with the new values
                 .returning(EncryptedIndicator::as_returning())
                 .get_result(&mut conn)?;
 
-            let _ = self
-                .logger
-                .write_log(log::Level::Info, &format!("Adding indicator: {:?}", res));
+            // let _ = self
+            //     .logger
+            //     .write_log(log::Level::Info, &format!("Adding indicator: {:?}", res));
             Ok(res)
         }
     }
@@ -156,7 +149,7 @@ impl Node {
         self.privacy_level
     }
 
-    pub fn get_indicator_by_id(
+    pub async fn get_indicator_by_id(
         &self,
         indicator_id: &String,
     ) -> Result<ThreatIndicator, Box<dyn std::error::Error + Send + Sync>> {
@@ -167,11 +160,11 @@ impl Node {
             .find(indicator_id)
             .first::<EncryptedIndicator>(&mut conn)?;
 
-        let indicator = ThreatIndicator::decrypt(&indicator, &self.key_mgr)?;
+        let indicator = ThreatIndicator::decrypt(&indicator.data, &self.key_mgr).await?;
         Ok(indicator)
     }
 
-    pub fn list_indicators_by_tlp(
+    pub async fn list_indicators_by_tlp(
         &self,
         tlp: TlpLevel,
     ) -> Result<Vec<ThreatIndicator>, Box<dyn std::error::Error + Send + Sync>> {
@@ -180,23 +173,19 @@ impl Node {
         let mut conn = self.db_pool.get()?;
         let indicators = encrypted_indicators
             .filter(tlp_level.eq(tlp.to_string()))
-            .load::<EncryptedIndicator>(&mut conn)?;
+            .select(data)
+            .load::<Vec<u8>>(&mut conn)?;
 
-        let indicators = indicators
-            .iter()
-            .map(|i| ThreatIndicator::decrypt(i, &self.key_mgr))
-            .collect::<Result<Vec<ThreatIndicator>, std::io::Error>>()?;
-
+        let indicators =
+            ThreatIndicator::decrypt_batch_parallel(&indicators, &self.key_mgr).await?;
         Ok(indicators)
     }
 
-    pub fn list_objects_by_tlp(
+    pub async fn list_objects_by_tlp(
         &self,
         tlp: TlpLevel,
     ) -> Result<Vec<serde_json::Value>, Box<dyn std::error::Error + Send + Sync>> {
-        let indicators = self.list_indicators_by_tlp(tlp)?;
-
-        println!("Indicators: {:?}", indicators);
+        let indicators = self.list_indicators_by_tlp(tlp).await?;
 
         let mut stix_indicators: Vec<serde_json::Value> = indicators
             .iter()
@@ -218,7 +207,8 @@ impl Node {
     }
 
     pub fn read_logs(&self, date: &str) -> io::Result<Vec<String>> {
-        self.logger.read_logs(date)
+        // self.logger.read_logs(date)
+        Ok(Vec::new())
     }
 }
 

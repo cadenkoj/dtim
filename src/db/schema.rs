@@ -4,9 +4,7 @@ diesel::table! {
     encrypted_indicators (id) {
         #[max_length = 64]
         id -> Bpchar,
-        ciphertext -> Bytea,
-        nonce -> Bytea,
-        mac -> Bytea,
+        data -> Bytea,
         tlp_level -> Text,
     }
 }

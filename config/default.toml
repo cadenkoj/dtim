@@ -1,13 +1,19 @@
 [default]
+org = "cadenkoj"
 address = "0.0.0.0"
 port = 3030
 log_level = "info"
 
-[default.tls]
-key_rotation_days = 7
+[security.tls]
 ca = "certs/ca.crt"
 certs = "certs/node.crt"
 key = "certs/node.key"
+
+[security.mesh]
+key_rotation_days = 7
+
+[security.symmetric_key]
+key_rotation_days = 7
 
 [default.storage]
 encrypted_logs_path = "data/logs"

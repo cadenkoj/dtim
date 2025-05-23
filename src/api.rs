@@ -16,24 +16,29 @@ use serde::Serialize;
 use std::sync::Arc;
 use tokio::sync::Mutex;
 
-use crate::models::ThreatIndicator;
 use crate::{
     crypto::MeshIdentity,
     db::models::EncryptedIndicator,
-    error::{ApiError, ApiErrorResponse},
+    errors::{ApiError, ApiErrorResponse},
     node::{Node, NodePeer},
 };
+use crate::{crypto::MeshIdentityManager, models::ThreatIndicator};
 use crate::{crypto::SymmetricKeyManager, models::StixBundle};
 
 #[derive(Clone)]
 pub struct AppState {
     pub node: Arc<Mutex<Node>>,
-    pub key_mgr: SymmetricKeyManager,
+    pub key_mgr: Arc<Mutex<SymmetricKeyManager>>,
+    pub mesh_identity_mgr: Arc<Mutex<MeshIdentityManager>>,
 }
 
 type ApiResponse<T> = Result<(StatusCode, Json<T>), ApiErrorResponse>;
 
-async fn auth(req: Request, next: Next) -> Result<Response, ApiErrorResponse> {
+async fn auth(
+    State(state): State<AppState>,
+    req: Request,
+    next: Next,
+) -> Result<Response, ApiErrorResponse> {
     let (parts, body) = req.into_parts();
     let headers = &parts.headers;
 
@@ -55,7 +60,7 @@ async fn auth(req: Request, next: Next) -> Result<Response, ApiErrorResponse> {
         return Err(ApiError::UNAUTHORIZED.into());
     };
 
-    if let Some(node_id) = authorize_client_node(auth_data).await {
+    if let Some(node_id) = authorize_client_node(auth_data, state.mesh_identity_mgr).await {
         let mut req = Request::from_parts(parts, Body::from(bytes));
         req.extensions_mut().insert(node_id);
         Ok(next.run(req).await)
@@ -66,6 +71,7 @@ async fn auth(req: Request, next: Next) -> Result<Response, ApiErrorResponse> {
 
 async fn authorize_client_node(
     (pubkey, sig, body): (String, String, &Bytes),
+    mesh_identity_mgr: Arc<Mutex<MeshIdentityManager>>,
 ) -> Option<MeshIdentity> {
     let pub_bytes: [u8; 32] = BASE64_STANDARD
         .decode(pubkey)
@@ -73,8 +79,10 @@ async fn authorize_client_node(
         .and_then(|bytes| bytes.as_slice().try_into().ok())?;
 
     let verifying_key = VerifyingKey::from_bytes(&pub_bytes).ok()?;
-    let valid = MeshIdentity::verify(verifying_key, body, &sig);
-    let node_id = MeshIdentity::derive_hex_id(&pub_bytes);
+    let mesh_identity_mgr = mesh_identity_mgr.lock().await;
+    let valid = mesh_identity_mgr.verify(body, &sig);
+    let node_id = MeshIdentityManager::derive_hex_id(&pub_bytes);
+
     // TODO: Check if the node is registered (persist in db)
     if valid {
         Some(MeshIdentity::Remote {
@@ -88,11 +96,17 @@ async fn authorize_client_node(
 
 pub async fn start_server(
     node: Arc<Mutex<Node>>,
-    key_mgr: SymmetricKeyManager,
+    key_mgr: Arc<Mutex<SymmetricKeyManager>>,
+    mesh_identity_mgr: Arc<Mutex<MeshIdentityManager>>,
     config: Arc<ServerConfig>,
     address: String,
     port: u16,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    let state = AppState {
+        node,
+        key_mgr,
+        mesh_identity_mgr,
+    };
     let app = Router::new()
         // Peer registry endpoints
         .route("/api/v1/echo", post(echo_handler))
@@ -123,8 +137,8 @@ pub async fn start_server(
             "/taxii2/root/collections/{id}/objects/",
             post(taxii_post_objects_handler),
         )
-        .with_state(Arc::new(AppState { node, key_mgr }))
-        .layer(middleware::from_fn(auth));
+        .layer(middleware::from_fn_with_state(state.clone(), auth))
+        .with_state(state);
 
     let addr = format!("{}:{}", address, port).parse()?;
     let tls_config = RustlsConfig::from_config(config);
@@ -163,7 +177,7 @@ struct NodePeersResponse {
 
 async fn register_node_handler(
     Extension(_): Extension<MeshIdentity>,
-    State(state): State<Arc<AppState>>,
+    State(state): State<AppState>,
     Json(peer): Json<NodePeer>,
 ) -> ApiResponse<NodePeersResponse> {
     let mut node = state.node.lock().await;
@@ -177,7 +191,7 @@ async fn register_node_handler(
     ))
 }
 
-async fn get_peers_handler(State(state): State<Arc<AppState>>) -> ApiResponse<NodePeersResponse> {
+async fn get_peers_handler(State(state): State<AppState>) -> ApiResponse<NodePeersResponse> {
     let node = state.node.lock().await;
     Ok((
         StatusCode::OK,
@@ -197,21 +211,21 @@ struct GossipIndicatorsResponse {
 }
 
 async fn gossip_indicators_handler(
-    State(state): State<Arc<AppState>>,
+    State(state): State<AppState>,
     Json(indicators): Json<Vec<EncryptedIndicator>>,
 ) -> ApiResponse<GossipIndicatorsResponse> {
-    let mut decrypted: Vec<ThreatIndicator> = indicators
-        .into_iter()
-        .filter_map(|enc| ThreatIndicator::decrypt(&enc, &state.key_mgr).ok())
-        .collect();
-    let mut node = state.node.lock().await;
+    // let mut decrypted: Vec<ThreatIndicator> = indicators
+    //     .into_iter()
+    //     .filter_map(async |enc| ThreatIndicator::decrypt(&enc.data, &state.key_mgr).await.ok())
+    //     .collect();
+    // let mut node = state.node.lock().await;
     let mut count = 0;
-    for indicator in decrypted.drain(..) {
-        match node.add_or_increment_indicator(indicator) {
-            Ok(_) => count += 1,
-            Err(_) => log::error!("DB insert failed"),
-        }
-    }
+    // for indicator in decrypted.drain(..) {
+    //     match node.add_or_increment_indicator(indicator).await {
+    //         Ok(_) => count += 1,
+    //         Err(_) => log::error!("DB insert failed"),
+    //     }
+    // }
     Ok((
         StatusCode::OK,
         Json(GossipIndicatorsResponse {
@@ -228,11 +242,12 @@ struct GetIndicatorsResponse {
 }
 
 async fn get_public_indicators_handler(
-    State(state): State<Arc<AppState>>,
+    State(state): State<AppState>,
 ) -> ApiResponse<GetIndicatorsResponse> {
     let node = state.node.lock().await;
     let indicators = node
         .list_indicators_by_tlp(crate::models::TlpLevel::White)
+        .await
         .map_err(|_| ApiError::INTERNAL_SERVER_ERROR)?;
     // Return anonymized (open) view
     Ok((
@@ -245,11 +260,12 @@ async fn get_public_indicators_handler(
 }
 
 async fn get_private_indicators_handler(
-    State(state): State<Arc<AppState>>,
+    State(state): State<AppState>,
 ) -> ApiResponse<GetIndicatorsResponse> {
     let node = state.node.lock().await;
     let indicators = node
         .list_indicators_by_tlp(crate::models::TlpLevel::Red)
+        .await
         .map_err(|_| ApiError::INTERNAL_SERVER_ERROR)?;
     // TODO: Ensure the node is an authenticated recipient for private indicators
     // Return anonymized (moderate) view
@@ -263,12 +279,13 @@ async fn get_private_indicators_handler(
 }
 
 async fn get_indicator_by_id_handler(
-    State(state): State<Arc<AppState>>,
+    State(state): State<AppState>,
     Path(id): Path<String>,
 ) -> ApiResponse<serde_json::Value> {
     let node = state.node.lock().await;
     let indicator = node
         .get_indicator_by_id(&id)
+        .await
         .map_err(|_| ApiError::NOT_FOUND)?;
     Ok((StatusCode::OK, Json(indicator.to_json(node.get_level()))))
 }
@@ -276,7 +293,7 @@ async fn get_indicator_by_id_handler(
 // --- Log Viewer ---
 
 async fn read_logs_handler(
-    State(state): State<Arc<AppState>>,
+    State(state): State<AppState>,
     Path(date): Path<String>,
 ) -> ApiResponse<Vec<String>> {
     let node = state.node.lock().await;
@@ -288,7 +305,7 @@ async fn read_logs_handler(
 
 // --- TAXII Handlers ---
 
-async fn taxii_discovery_handler(State(state): State<Arc<AppState>>) -> Json<serde_json::Value> {
+async fn taxii_discovery_handler(State(state): State<AppState>) -> Json<serde_json::Value> {
     let node = state.node.lock().await;
     Json(serde_json::json!({
         "title": format!("DTIM TAXII Server (node--{})", node.get_id()),
@@ -322,12 +339,13 @@ async fn taxii_collections_handler() -> Json<serde_json::Value> {
 }
 
 async fn taxii_get_objects_handler(
-    State(state): State<Arc<AppState>>,
+    State(state): State<AppState>,
     Path(_collection_id): Path<String>,
 ) -> ApiResponse<serde_json::Value> {
     let node = state.node.lock().await;
     let stix_objects = node
         .list_objects_by_tlp(crate::models::TlpLevel::White)
+        .await
         .map_err(|error| {
             println!("Error: {:?}", error);
             ApiError::INTERNAL_SERVER_ERROR
@@ -337,13 +355,14 @@ async fn taxii_get_objects_handler(
 }
 
 async fn taxii_post_objects_handler(
-    State(state): State<Arc<AppState>>,
+    State(state): State<AppState>,
     Path(_collection_id): Path<String>,
     Json(stix): Json<serde_json::Value>,
 ) -> ApiResponse<serde_json::Value> {
     let indicator = ThreatIndicator::from_stix(stix).map_err(|_| ApiError::INVALID_STIX_OBJECT)?;
     let mut node = state.node.lock().await;
     node.add_indicator(indicator)
+        .await
         .map_err(|_| ApiError::INTERNAL_SERVER_ERROR)?;
     Ok((StatusCode::OK, Json(serde_json::json!({ "status": "ok" }))))
 }

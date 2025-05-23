@@ -1,3 +1,4 @@
+use anyhow::Result;
 use serde::Deserialize;
 use std::path::PathBuf;
 
@@ -55,6 +56,7 @@ pub struct WatchersConfig {
 #[derive(Debug, Deserialize)]
 #[allow(unused)]
 pub(crate) struct Settings {
+    pub org: String,
     pub address: String,
     pub port: u16,
     pub log_level: String,
@@ -72,7 +74,7 @@ struct Root {
 }
 
 impl Settings {
-    pub(crate) fn new() -> Result<Settings, Box<dyn std::error::Error + Send + Sync>> {
+    pub(crate) fn new() -> Result<Settings> {
         dotenvy::dotenv_override()?;
 
         let config = config::Config::builder()

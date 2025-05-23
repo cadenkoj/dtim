@@ -3,8 +3,23 @@ name = "dtim"
 version = "0.1.0"
 edition = "2021"
 default-run = "dtim"
+authors = ["Caden D <caden.koj@gmail.com>"]
+description = "DTIM is a decentralized threat intelligence management system."
+license = "Apache-2.0"
+repository = "https://github.com/cadenkoj/dtim"
+documentation = "https://github.com/cadenkoj/dtim/blob/main/README.md"
+
+[profile.release]
+lto = "fat"
+codegen-units = 1
+panic = "abort"
+opt-level = 3
+
+[profile.release.package."*"]
+opt-level = 3
 
 [dependencies]
+mimalloc = { version = "0.1", features = ["secure"] }
 axum = { version = "0.8", features = ["http2", "tokio"] }
 axum-server = { version = "0.7", features = ["tls-rustls"] }
 chrono = { version = "0.4", features = ["serde"] }
@@ -16,12 +31,12 @@ rustls = "0.23"
 tokio = { version = "1.36", features = ["full"] }
 tokio-rustls = "0.26"
 config = "0.15"
-aes-gcm = "0.10"
 base64 = "0.22"
 log = "0.4"
 env_logger = "0.11"
 regex = "1.11"
 ed25519-dalek = { version = "2.1", features = ["rand_core"] }
+rand = "0.8"
 sha2 = "0.10"
 hex = "0.4"
 async-trait = "0.1"
@@ -29,3 +44,12 @@ http-body-util = "0.1"
 dotenvy = "0.15"
 once_cell = "1.21"
 diesel = { version = "2.2.0", features = ["postgres", "r2d2", "chrono"] }
+metrics = "0.24"
+rayon = "1.10"
+ring = "0.17"
+anyhow = "1.0"
+thiserror = "2.0"
+zeroize = { version = "1.8", features = ["zeroize_derive"] }
+directories = "6.0"
+bincode = "2.0"
+hostname = "0.4"

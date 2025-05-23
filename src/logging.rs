@@ -35,16 +35,11 @@ impl EncryptedLogger {
         let timestamp = Utc::now().to_rfc3339();
         let log_entry = format!("[{}] [{}] {}\n", timestamp, level, message);
 
-        let (ciphertext, nonce, mac) = self
+        let data = self
             .key_mgr
             .encrypt(log_entry.as_bytes())
             .map_err(|e| std::io::Error::other(format!("Encryption failed: {}", e)))?;
-        let encrypted_entry = format!(
-            "{}\n{}\n{}\n",
-            BASE64_STANDARD.encode(ciphertext),
-            BASE64_STANDARD.encode(nonce),
-            BASE64_STANDARD.encode(mac)
-        );
+        let encrypted_entry = format!("{}\n", BASE64_STANDARD.encode(data));
 
         let filename = format!("{}.log", Utc::now().format("%Y-%m-%d"));
         let log_file = self.log_path.join(filename);
@@ -73,26 +68,14 @@ impl EncryptedLogger {
 
         let mut lines = content.lines().peekable();
         while lines.peek().is_some() {
-            let ciphertext = lines
-                .next()
-                .and_then(|line| BASE64_STANDARD.decode(line).ok())
-                .ok_or_else(|| {
-                    std::io::Error::new(std::io::ErrorKind::InvalidData, "Invalid log format")
-                })?;
-            let nonce = lines
-                .next()
-                .and_then(|line| BASE64_STANDARD.decode(line).ok())
-                .ok_or_else(|| {
-                    std::io::Error::new(std::io::ErrorKind::InvalidData, "Invalid log format")
-                })?;
-            let mac = lines
+            let data = lines
                 .next()
                 .and_then(|line| BASE64_STANDARD.decode(line).ok())
                 .ok_or_else(|| {
                     std::io::Error::new(std::io::ErrorKind::InvalidData, "Invalid log format")
                 })?;
 
-            match self.key_mgr.decrypt(ciphertext, nonce, mac) {
+            match self.key_mgr.decrypt(&data) {
                 Ok(decrypted) => {
                     if let Ok(log_entry) = String::from_utf8(decrypted) {
                         decrypted_logs.push(log_entry);
